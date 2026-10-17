@@ -122,7 +122,7 @@ python3 scripts/manage.py status
 python3 scripts/manage.py stop
 ```
 
-本机沿用 Apple Container；`manage.py` 只管理 PanSou API，不启停 AList 或旧网页容器。追更调度与服务启停独立；首批6小时 Codex heartbeat 已启用，只检查指定且启用的订阅，不自动扩大范围。本机及 Codex 需可运行，首次定时触发仍待实际观察。
+`manage.py` 按 Apple container（仅 macOS）、`docker`、`podman` 的顺序自动选用容器运行时，也可用 `MEDIA_HELPER_CONTAINER_RUNTIME` 指定；本机沿用 Apple container，Linux 用法见[密钥存储与配置](docs/credentials.md#部署到其他机器)。它只管理 PanSou API，不启停 AList 或旧网页容器。追更调度与服务启停独立；首批6小时 Codex heartbeat 已启用，只检查指定且启用的订阅，不自动扩大范围。本机及 Codex 需可运行，首次定时触发仍待实际观察。
 
 ## 验证与来源
 

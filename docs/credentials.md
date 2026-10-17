@@ -43,4 +43,4 @@ python3 scripts/media.py doctor --check-quark
 3. 用 `configure-quark`、`configure-tmdb` 重新录入凭据，并在 `config/headless.json` 填入影库根目录和分类目录 ID（可从 `config/headless.example.json` 复制）。
 4. 运行 `doctor --check-quark` 确认可读。
 
-`scripts/manage.py` 目前用 Apple Container 管理 PanSou；在 Linux 上需自行用 Docker 或 Podman 运行同一 PanSou 镜像，并把 `pansou_url` 指向它。
+`scripts/manage.py` 按 Apple container（仅 macOS）、`docker`、`podman` 的顺序自动选择容器运行时，Linux 上装有 Docker 或 Podman 即可用 `up`/`status`/`stop` 管理 PanSou，容器名、标签、端口与资源限制与 macOS 一致。两者都装或 `docker` 守护进程未运行时，用 `MEDIA_HELPER_CONTAINER_RUNTIME=podman`（或可执行文件路径，如 `/usr/bin/docker`）指定。运行用户需能直接调用该运行时：Docker 需在 `docker` 组内，或改用无 root 的 Podman。Podman 下缓存目录以 `:Z` 挂载，以适配 SELinux 主机。`config/images.lock.json` 的镜像 digest 按 `linux/arm64` 记录；x86_64 主机若拉取失败，需更新为对应平台的 digest。服务固定监听 `127.0.0.1:8888`，与 `config/headless.example.json` 中的 `pansou_url` 一致。
