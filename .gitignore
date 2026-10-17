@@ -1,0 +1,11 @@
+runtime/
+vendor/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.DS_Store
+
+# Local configuration with real library folder IDs; see config/headless.example.json
+config/headless.json
+.claude/

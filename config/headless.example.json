@@ -1,0 +1,35 @@
+{
+  "mode": "headless",
+  "provider": "quark",
+  "library_root_id": "影库根目录ID",
+  "metadata_source": "auto",
+  "pansou_url": "http://127.0.0.1:8888",
+  "timezone": "Asia/Shanghai",
+  "include_media_tags": true,
+  "overwrite": false,
+  "delete": false,
+  "rename_existing_files": false,
+  "open_browser": false,
+  "credential_source": {
+    "type": "file"
+  },
+  "categories": {
+    "tv": {
+      "folder_id": "分类目录ID",
+      "name": "电视剧"
+    },
+    "movie": {
+      "folder_id": "分类目录ID",
+      "name": "电影"
+    },
+    "documentary": {
+      "folder_id": "分类目录ID",
+      "name": "纪录片"
+    },
+    "variety": {
+      "folder_id": "分类目录ID",
+      "name": "综艺节目"
+    }
+  },
+  "version_preset": "quality"
+}

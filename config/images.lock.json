@@ -1,0 +1,7 @@
+{
+  "pansou": {
+    "image": "ghcr.io/fish2018/pansou@sha256:d371fe5caa87794414dd54cda063fcfc456d5013e18b65dbf1f6ca17f6299492",
+    "source_revision": "221665fb2c9279f22af4684ea2d8c0c331eac1cc",
+    "platform": "linux/arm64"
+  }
+}
