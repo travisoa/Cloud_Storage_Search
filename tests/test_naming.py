@@ -40,6 +40,20 @@ class NamingTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIsNone(media_info(name)["resolution"])
 
+    def test_glued_labels_are_split_only_when_every_piece_is_known(self):
+        for name in ("S01E08 4KHDR60FPS-GyWEB.mp4", "S01E07 4KHQHDR60FPS-GyWEB.mp4"):
+            with self.subTest(name=name):
+                info = media_info(name)
+                self.assertEqual((info["resolution"], info["hdr"], info["basis"]), ("2160p", "HDR", "filename"))
+        self.assertEqual(episode_filename("嫁金钗", 1, 8, ".mp4", media_info("S01E08 4KHDR60FPS-GyWEB.mp4")),
+                         "嫁金钗S01E08_2160P_HDR.mp4")
+        info = media_info("剧名.S01E01.2160pHEVCDoVi.mkv")
+        self.assertEqual((info["resolution"], info["codec"], info["hdr"]), ("2160p", "HEVC", "Dolby Vision"))
+        for name in ("4KIDS.S01E01.mp4", "show.4KHQX.mkv", "show.HDRip.mkv", "show.DVDRip.mkv"):
+            with self.subTest(name=name):
+                info = media_info(name)
+                self.assertEqual((info["resolution"], info["hdr"]), (None, None))
+
     def test_codec_and_hdr_require_explicit_labels(self):
         info = media_info("剧名.S01E01.2160p.x265.HDR10+.mkv")
         self.assertEqual((info["codec"], info["hdr"]), ("HEVC", "HDR10+"))

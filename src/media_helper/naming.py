@@ -31,10 +31,24 @@ _AUDIO_CODECS = (
     ("Opus", r"opus"), ("MP3", r"mp3"), ("LPCM", r"lpcm"), ("PCM", r"pcm"),
 )
 _CHANNELS = r"(?:[1-9]\.[01](?:\.[2-9])?|[1-9][0-9]?ch)"
+# Release groups often glue labels together (4KHQHDR60FPS). A run is split only
+# when it consists entirely of known label pieces, so words that merely start
+# with one (4KIDS, UHDTV, HDRip) stay whole and remain unlabelled.
+_GLUED_PIECES = (r"4320p|2160p|1440p|1080p|720p|576p|480p|8k|4k|uhd|hdr10\+|hdr10|hdr|dovi|dv|hlg|sdr"
+                 r"|hevc|[hx]265|avc|[hx]264|av1|hq|hfr|\d{2,3}fps|10bit|8bit|web(?:dl|rip)?|bluray|remux")
+_GLUED_RUN = re.compile(r"[a-z0-9+]+", re.I)
+
+
+def _split_glued(text):
+    def split(match):
+        run = match.group(0)
+        pieces = re.findall(_GLUED_PIECES, run, re.I)
+        return " ".join(pieces) if len(pieces) > 1 and "".join(pieces).casefold() == run.casefold() else run
+    return _GLUED_RUN.sub(split, text)
 
 
 def _labels(value, patterns):
-    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = _split_glued(unicodedata.normalize("NFKC", str(value)))
     return [{"value": canonical, "label": match.group(0)}
             for canonical, pattern in patterns
             for match in re.finditer(r"(?<![a-z0-9])(?:" + pattern + r")(?![a-z0-9])",
