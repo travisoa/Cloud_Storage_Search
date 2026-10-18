@@ -163,38 +163,35 @@ class ArchiveExtractionTests(unittest.TestCase):
         self.assertFalse(report["writes_attempted"])
         self.assertEqual((self.storage.created, self.storage.submissions, self.journal.events), ([], [], []))
 
-    def test_preexisting_snapshot_covers_entire_authorized_library(self):
-        self.storage.rows["root"].append(item("other", "另一剧集", "root", directory=True))
-        self.storage.rows["other"] = [item("old-video", "old.mkv", "other", size=777)]
-        self.assertEqual(self.run_archive(apply=True)["status"], "EXTRACTED")
-        state = self.journal.get(self.key)
-        self.assertTrue(state["before_inventory"]["complete"])
-        self.assertTrue({"root", "source", "archive1", "other", "old-video"} <= set(state["before_fids"]))
-        self.assertNotIn("isolated1", state["before_fids"])
-
-    def test_incomplete_global_inventory_or_limits_block_before_any_cloud_write(self):
-        for changes in ({"max_entries": 1}, {"max_depth": 0}):
-            report = self.run_archive(apply=True, **changes)
-            self.assertEqual(report["status"], "NEEDS_INPUT", report)
-            self.assertEqual((self.storage.created, self.storage.submissions), ([], []))
-        self.storage.rows["root"].append(item("unreadable", "无法读取", "root", directory=True))
+    def test_extraction_does_not_scan_unrelated_library_folders(self):
+        # Listing this folder would raise: only the source, root and target are read.
+        self.storage.rows["root"].append(item("unreadable", "另一剧集", "root", directory=True))
         report = self.run_archive(apply=True)
-        self.assertEqual(report["status"], "NEEDS_INPUT", report)
-        self.assertEqual((self.storage.created, self.storage.submissions), ([], []))
+        self.assertEqual(report["status"], "EXTRACTED", report)
+        self.assertNotIn("before_fids", self.journal.get(self.key))
 
-    def test_nested_output_cannot_adopt_an_old_library_fid(self):
-        self.storage.rows["source"].append(item("old-video", "old.mkv", "source", size=777))
+    def test_source_scope_is_proven_once_per_extraction(self):
+        self.storage.rows["root"] = [item("shows", "剧集", "root", directory=True)]
+        self.storage.rows["shows"] = [item("source", "待处理", "shows", directory=True)]
+        reads = []
+        original = self.storage.list_files
+        self.storage.list_files = lambda parent: (reads.append(parent), original(parent))[1]
+        report = self.run_archive(apply=True, source_action="recycle")
+        self.assertEqual(report["status"], "EXTRACTED", report)
+        self.assertEqual(self.storage.trashed, ["archive1"])
+        self.assertEqual(reads.count("shows"), 1)
+
+    def test_output_limits_apply_only_to_the_extraction_folder(self):
         original = self.storage.extract_archive
-        def moved_old_file(*args, **kwargs):
+        def nested(*args, **kwargs):
             original(*args, **kwargs)
             self.storage.rows["isolated1"] = [item("new-dir", "展开目录", "isolated1", directory=True)]
-            self.storage.rows["new-dir"] = [item("old-video", "old.mkv", "new-dir", size=777)]
-            self.storage.rows["source"] = [row for row in self.storage.rows["source"] if row["fid"] != "old-video"]
+            self.storage.rows["new-dir"] = [item("new-video", "new.mkv", "new-dir", size=777)]
             return {"task_id": "task1", "status": "done", "extracted_fids": ["new-dir"]}
-        self.storage.extract_archive = moved_old_file
-        report = self.run_archive(apply=True)
+        self.storage.extract_archive = nested
+        report = self.run_archive(apply=True, max_entries=1, source_action="recycle")
         self.assertEqual(report["status"], "NEEDS_INPUT", report)
-        self.assertIn("extracted_nested_identifier_is_not_new", report["reasons"])
+        self.assertEqual(self.storage.trashed, [])
 
     def test_valid_nested_output_requires_complete_recursive_identity_checks(self):
         original = self.storage.extract_archive

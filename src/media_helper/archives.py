@@ -321,7 +321,7 @@ def _folder_check(storage, library_root_id, folder, label, *, nested, ignored_fi
 
 
 def _clean_leftovers(storage, state, save, report, *, library_root_id, staging, include_target,
-                     can_write, recorded_only=False):
+                     can_write, recorded_only=False, source_verified=False):
     """Handle the source archive, then the fetch staging folder, then the extraction folder."""
     source, target = state["bound"]["source"], state["target"]
     cleanup = report.setdefault("cleanup", {})
@@ -336,8 +336,9 @@ def _clean_leftovers(storage, state, save, report, *, library_root_id, staging, 
         return _folder_check(storage, library_root_id, staging, "fetch_staging_folder", nested=False,
                              ignored_fid=source["fid"] if source_state == "planned" else None)
 
+    # A source the same run just reread in its folder needs no second scope proof.
     steps = [("source_cleanup", source["fid"], source["parent_id"],
-              lambda: _source_check(storage, library_root_id, source))]
+              (lambda: None) if source_verified else (lambda: _source_check(storage, library_root_id, source)))]
     if staging or state.get("staging_cleanup"):
         steps.append(("staging_cleanup", (staging or {}).get("folder_id"), library_root_id, staging_check))
     if include_target or state.get("target_cleanup"):
@@ -437,16 +438,14 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
                 getattr(storage, "_sleep", lambda delay: None)(0.3)
         raise _Stop("UNKNOWN", "isolated_target_not_observed")
 
-    def verify_source_scope():
-        try:
-            _within(storage, library_root_id, parent_id)
-        except ValueError:
-            raise _Stop("NEEDS_INPUT", "source_archive_scope_changed") from None
+    def verify_source():
+        # Scope is proven once per run; before a write only the archive's own
+        # folder is reread.
         current = [row for row in _listing(storage, parent_id) if row["fid"] == fid]
         if current != [source]:
             raise _Stop("NEEDS_INPUT", "source_archive_identity_changed")
 
-    def cleanup_leftovers():
+    def cleanup_leftovers(source_verified=False):
         if source_action == "ask" and not any(state.get(field) for field in _CLEANUP):
             source = state["bound"]["source"]
             report["cleanup"]["source"] = {"state": "awaiting_choice", "name": source["name"], "size": source["size"]}
@@ -454,7 +453,7 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
         try:
             _clean_leftovers(storage, state, save, report, library_root_id=library_root_id, staging=staging,
                              include_target=False, can_write=can_write and source_action == "recycle",
-                             recorded_only=source_action != "recycle")
+                             recorded_only=source_action != "recycle", source_verified=source_verified)
         except (AuthenticationError, RiskControlError):
             raise
         except Exception as exc:
@@ -481,7 +480,8 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
             _id(value)
         if state.get("extracted_fids") is not None and set(state["extracted_fids"]) != set(fids):
             raise _Stop("NEEDS_INPUT", "completed_archive_task_identifiers_changed")
-        if any(value in state["before_fids"] or value in {fid, library_root_id, state["target"]["folder_id"]} for value in fids):
+        known = {fid, parent_id, library_root_id, state["target"]["folder_id"]}
+        if any(value in known for value in fids):
             raise _Stop("NEEDS_INPUT", "extracted_identifier_is_not_new")
         verify_target()
         for index in range(3):
@@ -493,18 +493,17 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
                 output = _inventory(storage, state["target"]["folder_id"],
                                     max_entries=max_entries, max_depth=max_depth)
                 output_ids = set(output["fids"]) - {state["target"]["folder_id"]}
-                if output_ids.intersection(state["before_fids"]) or output_ids.intersection({fid, library_root_id}):
+                if output_ids & known:
                     raise _Stop("NEEDS_INPUT", "extracted_nested_identifier_is_not_new")
                 current_source = [row for row in _listing(storage, parent_id) if row["fid"] == fid]
                 if current_source != [state["bound"]["source"]]:
                     report["source_preserved"] = False
                     raise _Stop("NEEDS_INPUT", "original_archive_no_longer_matches_verified_source")
-                verify_source_scope()
                 state.update(status="EXTRACTED", extracted_fids=fids)
                 save()
                 report["new_files"] = [by_id[value] for value in fids]
                 report["verified_output_count"] = len(output_ids)
-                cleanup_leftovers()
+                cleanup_leftovers(source_verified=True)
                 return finish("EXTRACTED")
             if index < 2:
                 getattr(storage, "_sleep", lambda delay: None)(0.3)
@@ -539,18 +538,10 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
             if not isinstance(old, dict) or old.get("kind") != "archive_extract" or old.get("bound") != bound:
                 return finish("NEEDS_INPUT", "archive_source_or_account_scope_changed")
             state = deepcopy(old)
-            if not isinstance(state.get("target"), dict) or not isinstance(state.get("before_fids"), list):
+            if not isinstance(state.get("target"), dict):
                 return finish("NEEDS_INPUT", "invalid_archive_job_evidence")
-            inventory = state.get("before_inventory")
-            if (not isinstance(inventory, dict) or inventory.get("complete") is not True
-                    or inventory.get("root_id") != library_root_id
-                    or inventory.get("fids") != sorted(state["before_fids"])
-                    or library_root_id not in state["before_fids"]):
-                return finish("NEEDS_INPUT", "complete_preexisting_library_inventory_required")
             target = state["target"]
-            if (target.get("parent_id") != library_root_id or target.get("name") != "解压待整理_" + _digest(bound)[:16]
-                    or len(set(state["before_fids"])) != len(state["before_fids"])
-                    or (target.get("folder_id") and target["folder_id"] in state["before_fids"])):
+            if target.get("parent_id") != library_root_id or target.get("name") != "解压待整理_" + _digest(bound)[:16]:
                 return finish("NEEDS_INPUT", "invalid_archive_target_creation_evidence")
             if state.get("status") not in {"TARGET_SUBMITTING", "TARGET_CREATED", "TARGET_READY", "SUBMITTING",
                                            "SUBMITTED", "EXTRACTED", "FAILED", "REJECTED", "UNKNOWN"}:
@@ -582,22 +573,17 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
             root_rows = _listing(storage, library_root_id)
             if any(row["name"] == target_name for row in root_rows):
                 return finish("NEEDS_INPUT", "isolated_target_name_already_exists_without_ownership")
-            before = _inventory(storage, library_root_id, max_entries=max_entries, max_depth=max_depth)
-            if [row for row in before["entries"] if row["fid"] == fid] != [source]:
-                return finish("NEEDS_INPUT", "source_archive_changed_during_inventory")
             report["target"] = {"parent_id": library_root_id, "name": target_name, "folder_id": None}
-            report["preexisting_inventory_count"] = len(before["fids"])
             if not can_write:
                 return finish("PLAN")
-            verify_source_scope()
+            verify_source()
             state = {"kind": "archive_extract", "bound": bound, "status": "TARGET_SUBMITTING",
-                     "target": deepcopy(report["target"]), "before_fids": before["fids"],
-                     "before_inventory": {key: deepcopy(before[key]) for key in ("complete", "root_id", "fids", "limits")}}
+                     "target": deepcopy(report["target"])}
             save()
             report["writes_attempted"] = True
             created = storage.mkdir(library_root_id, target_name)
             new_id = _id(created.get("fid") if isinstance(created, dict) else None)
-            if new_id in state["before_fids"]:
+            if new_id in {row["fid"] for row in root_rows} | {fid, parent_id, library_root_id}:
                 return finish("NEEDS_INPUT", "isolated_target_is_not_a_new_identifier")
             state["target"]["folder_id"] = new_id
             state["status"] = "TARGET_CREATED"
@@ -608,21 +594,12 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
             save()
         if not can_write:
             return finish("READY_TO_EXTRACT")
-        verify_target(empty=True)
-        # Snapshot every old fid again immediately before submission. Keep the
-        # union so a disappeared/moved old file can never become a new output.
-        latest = _inventory(storage, library_root_id, max_entries=max_entries, max_depth=max_depth)
-        if [row for row in latest["entries"] if row["fid"] == fid] != [source]:
-            return finish("NEEDS_INPUT", "source_archive_changed_during_inventory")
-        before_fids = sorted((set(state["before_fids"]) | set(latest["fids"])) - {state["target"]["folder_id"]})
-        state["before_fids"] = before_fids
-        state["before_inventory"] = {"complete": True, "root_id": library_root_id, "fids": before_fids,
-                                     "limits": latest["limits"]}
-        save()
+        # Only the new, empty target and the source are checked here; outputs are
+        # verified inside the target afterwards, never against a library-wide scan.
         verify_target(empty=True)
         # This must be the final cloud validation before the submission intent:
-        # target observations must not leave the source scope/identity stale.
-        verify_source_scope()
+        # target observations must not leave the source identity stale.
+        verify_source()
         state["status"] = "SUBMITTING"
         save()
         report["writes_attempted"] = True
