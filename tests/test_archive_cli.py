@@ -2,6 +2,7 @@
 import argparse
 from contextlib import ExitStack, redirect_stderr
 from copy import deepcopy
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,14 +10,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from media_helper.archive_cli import add_parser, run_command
+from media_helper.archive_cli import _fetched_archive_recycled, _job_key, add_parser, run_command
 from media_helper.journal import JobJournal
 from media_helper.library_registry import LibraryRegistry, drive_reference
+from media_helper.profiles import private_json
 from media_helper.providers import UnknownOutcome
 from tests.test_archives import ArchiveStorage, item
 
 
-class ArchiveCommandTests(unittest.TestCase):
+class ArchiveCommandCase(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -53,6 +55,8 @@ class ArchiveCommandTests(unittest.TestCase):
                                     "tv": {"folder_id": "tv", "name": "电视剧"}},
                                 "init_job_key": "library-init:" + "a" * 64, "test_only": test})
 
+
+class ArchiveCommandTests(ArchiveCommandCase):
     def test_inspect_reuses_current_credentials_without_cloud_writes(self):
         result = self.command("inspect", "--folder-id", "source")
         self.assertEqual(result["status"], "INSPECTED", result)
@@ -191,6 +195,137 @@ class ArchiveCommandTests(unittest.TestCase):
         self.assertEqual(self.storage.created, [])
         saved = json.loads((self.root / "runtime/reports/archive-latest.json").read_text())
         self.assertFalse(saved["imported"])
+
+
+class ArchiveCleanupOptionTests(ArchiveCommandCase):
+    """Leftover handling: project setting, per-run flags, the ask flow and organize."""
+
+    def extract(self, *flags):
+        return self.command("extract", "--fid", "archive1", "--parent-id", "source", "--apply", *flags)
+
+    def journal(self):
+        journal = JobJournal(self.root / "runtime/archive-jobs.sqlite3")
+        self.addCleanup(journal.close)
+        return journal
+
+    def record_fetch(self):
+        account = hashlib.sha256(b"quark:alist-storage:1").hexdigest()
+        self.journal().put("archive-fetch:" + "c" * 64, {
+            "kind": "archive_fetch", "status": "FETCHED", "archive_fid": "archive1",
+            "bound": {"account_scope_hash": account, "library_root_id": "root"},
+            "target": {"parent_id": "root", "name": "待处理", "folder_id": "source"}})
+
+    def organize(self, *flags):
+        account = hashlib.sha256(b"quark:alist-storage:1").hexdigest()
+        plan_id = "d" * 32
+        private_json(self.root / "runtime/archive-plans" / (plan_id + ".json"), {
+            "record_id": plan_id, "library_root_id": "root", "archive_fid": "archive1",
+            "report": {"library": {"library_root_id": "root", "account_scope_hash": account}}})
+        self.storage.rows["isolated1"] = []
+        with patch("media_helper.library_import.apply_import", return_value={
+                "status": "COMPLETE", "writes_attempted": True, "writes_performed": True}):
+            return self.command("organize", plan_id, *flags)
+
+    def test_unset_setting_keeps_archive_and_explains_the_options(self):
+        result = self.extract()
+        self.assertEqual(result["cleanup"]["source"]["state"], "kept", result)
+        self.assertEqual(result["cleanup"]["basis"], "default")
+        self.assertIn("archive_cleanup", result["cleanup"]["hint"])
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_recycle_setting_and_flags(self):
+        self.config["archive_cleanup"] = "recycle"
+        kept = self.extract("--keep-archive")
+        self.assertEqual((kept["cleanup"]["source"]["state"], kept["cleanup"]["basis"]), ("kept", "flag"))
+        self.assertEqual(self.storage.trashed, [])
+        recycled = self.extract()
+        self.assertEqual((recycled["cleanup"]["source"]["state"], recycled["cleanup"]["basis"]),
+                         ("recycled", "config"))
+        self.assertEqual(self.storage.trashed, ["archive1"])
+        self.setUp()
+        self.config["archive_cleanup"] = "keep"
+        self.assertEqual(self.extract("--remove-archive")["cleanup"]["source"]["state"], "recycled")
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.extract("--remove-archive", "--keep-archive")
+
+    def test_recycle_finds_the_fetch_staging_folder_from_the_journal(self):
+        self.record_fetch()
+        result = self.extract("--remove-archive")
+        self.assertEqual(result["cleanup"]["staging"]["state"], "recycled", result)
+        self.assertEqual(self.storage.trashed, ["archive1", "source"])
+
+    def test_ask_setting_returns_a_cleanup_command_that_works_later(self):
+        self.config["archive_cleanup"] = "ask"
+        self.record_fetch()
+        result = self.extract()
+        self.assertEqual(result["cleanup"]["source"]["state"], "awaiting_choice", result)
+        self.assertEqual(result["cleanup"]["choices"]["recycle"],
+                         "python3 scripts/media.py archive cleanup --fid archive1 --apply")
+        self.assertEqual(self.storage.trashed, [])
+        planned = self.command("cleanup", "--fid", "archive1", "--apply", "--plan")
+        self.assertEqual(planned["status"], "PLAN", planned)
+        done = self.command("cleanup", "--fid", "archive1", "--apply")
+        self.assertEqual(done["status"], "PARTIAL", done)
+        self.assertEqual({key: value["state"] for key, value in done["cleanup"].items()},
+                         {"source": "recycled", "staging": "recycled", "target": "kept"})
+        again = self.extract()
+        self.assertEqual(again["status"], "EXTRACTED", again)
+        self.assertEqual(again["cleanup"]["source"]["state"], "recycled")
+        self.assertEqual(self.storage.trashed, ["archive1", "source"])
+
+    def test_organize_recycles_the_emptied_extraction_folder_when_set_to_recycle(self):
+        self.config["archive_cleanup"] = "recycle"
+        self.record_fetch()
+        self.assertEqual(self.extract()["cleanup"]["staging"]["state"], "recycled")
+        result = self.organize("--apply")
+        self.assertEqual(result["status"], "COMPLETE", result)
+        self.assertEqual(result["cleanup"]["status"], "CLEAN", result)
+        self.assertEqual(self.storage.trashed, ["archive1", "source", "isolated1"])
+
+    def test_organize_only_offers_cleanup_when_set_to_ask_and_skips_it_for_keep(self):
+        self.extract()
+        self.config["archive_cleanup"] = "ask"
+        asked = self.organize("--apply")
+        self.assertEqual(asked["cleanup"]["choices"]["recycle"],
+                         "python3 scripts/media.py archive cleanup --fid archive1 --apply")
+        self.assertEqual({key: value["state"] for key, value in asked["cleanup"]["cleanup"].items()},
+                         {"source": "planned", "target": "planned"})
+        self.config["archive_cleanup"] = "keep"
+        self.assertNotIn("cleanup", self.organize("--apply"))
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_invalid_setting_is_rejected_before_cloud_writes(self):
+        self.config["archive_cleanup"] = True
+        with self.assertRaises(ValueError):
+            self.extract()
+        self.assertEqual((self.storage.created, self.storage.submissions), ([], []))
+
+    def test_invalid_setting_stops_fetch_extract_before_the_archive_is_saved(self):
+        self.config["archive_cleanup"] = "delete"
+        with patch("media_helper.tasks.TaskStore.load", return_value={"account_scope": "quark:alist-storage:1"}), \
+                patch("media_helper.archive_flow.task_candidate") as candidate, \
+                patch("media_helper.archive_flow.fetch") as fetch:
+            with self.assertRaises(ValueError):
+                self.command("fetch", "a" * 32, "--candidate-id", "b" * 64, "--apply", "--extract")
+        candidate.assert_not_called()
+        fetch.assert_not_called()
+
+    def test_test_only_library_cannot_recycle(self):
+        self.register(test=True)
+        with self.assertRaises(ValueError):
+            self.command("cleanup", "--fid", "archive1", "--library-id", "family", "--apply")
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_fetch_rerun_accepts_staging_emptied_by_its_own_recycle(self):
+        journal = self.journal()
+        fetched = {"kind": "archive_fetch", "status": "FETCHED", "archive_fid": "archive1",
+                   "target": {"folder_id": "source"}}
+        self.assertFalse(_fetched_archive_recycled(self.storage, journal, fetched))
+        journal.put(_job_key("archive", self.storage, "archive1"),
+                    {"kind": "archive_extract", "status": "EXTRACTED", "staging_cleanup": {"state": "recycled"},
+                     "bound": {"source": {"parent_id": "source"}}})
+        self.assertTrue(_fetched_archive_recycled(self.storage, journal, fetched))
+        self.assertFalse(_fetched_archive_recycled(self.storage, journal, {**fetched, "target": {"folder_id": "x"}}))
 
 
 if __name__ == "__main__":

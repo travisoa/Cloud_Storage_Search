@@ -2,9 +2,10 @@
 
 ``fetch`` saves exactly one user-selected single-file archive candidate into a
 new ``压缩包待解压_…`` folder under the library root. Extraction is the existing
-``archives.extract`` step; ``plan_output`` turns its verified, isolated output
-into an ordinary library import plan. Nothing here deletes, overwrites or moves
-old library files, and multipart or password archives stay manual.
+``archives.extract`` step, which may recycle the fetched archive afterwards;
+``plan_output`` turns its verified, isolated output into an ordinary library
+import plan. Nothing here deletes, overwrites or moves old library files, and
+multipart or password archives stay manual.
 """
 from __future__ import annotations
 
@@ -43,8 +44,13 @@ def task_candidate(task, candidate_id):
     return candidate, deepcopy(sources[0])
 
 
-def fetch(storage, *, candidate, source, library_root_id, journal, job_key, apply=False, reconcile=False):
-    """Save one selected archive into a new empty staging folder; never resubmit unknown writes."""
+def fetch(storage, *, candidate, source, library_root_id, journal, job_key, apply=False, reconcile=False,
+          archive_recycled=False):
+    """Save one selected archive into a new empty staging folder; never resubmit unknown writes.
+
+    ``archive_recycled`` means the verified extraction already recycled this
+    archive (and possibly the staging folder); that job reports the outcome.
+    """
     report = {"status": "PLAN", "candidate_id": candidate.get("candidate_id"), "writes_attempted": False,
               "writes_performed": False, "imported": False, "extracted": False, "reasons": [],
               "read_only": not bool(apply and not reconcile)}
@@ -122,6 +128,9 @@ def fetch(storage, *, candidate, source, library_root_id, journal, job_key, appl
             if state["target"].get("name") != staging_name(candidate_id) or state["target"].get("parent_id") != library_root_id:
                 return finish("NEEDS_INPUT", "invalid_staging_evidence")
             if state.get("status") == "FETCHED":
+                if archive_recycled:
+                    report["archive_recycled"] = True
+                    return finish("FETCHED")
                 return verify_saved([state["archive_fid"]])
             if state.get("status") == "TARGET_SUBMITTING" and not state["target"].get("folder_id"):
                 return finish("UNKNOWN", "staging_creation_unknown_without_identifier")

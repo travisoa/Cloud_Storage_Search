@@ -64,6 +64,12 @@ class JobJournal:
             self.connection.execute("INSERT INTO operations VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET record=excluded.record,updated=excluded.updated", (key, serialized, now))
             self.connection.execute("INSERT INTO events(key,record,created) VALUES(?,?,?)", (key, serialized, now))
 
+    def records(self, prefix):
+        """Current records whose key starts with ``prefix``, for read-only lookups."""
+        rows = self.connection.execute("SELECT key, record FROM operations WHERE substr(key, 1, ?) = ?",
+                                       (len(prefix), prefix))
+        return [(key, json.loads(record)) for key, record in rows]
+
     def close(self):
         self.connection.close()
 

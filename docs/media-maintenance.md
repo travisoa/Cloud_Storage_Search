@@ -52,13 +52,25 @@ python3 scripts/media.py archive inspect --folder-id FOLDER_ID
 python3 scripts/media.py archive extract --fid ARCHIVE_FID --parent-id SOURCE_PARENT --plan
 python3 scripts/media.py archive extract --fid ARCHIVE_FID --parent-id SOURCE_PARENT --apply
 python3 scripts/media.py archive extract --fid ARCHIVE_FID --parent-id SOURCE_PARENT --reconcile
+python3 scripts/media.py archive cleanup --fid ARCHIVE_FID --plan
+python3 scripts/media.py archive cleanup --fid ARCHIVE_FID --apply
 ```
 
 搜索优先选择直接视频。压缩包仅记录候选、格式及分卷线索；`skip` 跳过，`manual` 保留显式选择提示，两者均不自动转存或解压分享中的压缩包。包名不作为包内季集与画质的证据。
 
-对影库内明确选定且已获解压授权的单包，提交前核对源 fid、名称、大小及目录范围，仅写入该任务新建的空目录 `解压待整理_…`。保留原包并记录任务 ID，递归核验输出均位于该目录且不属于影库既有 fid。解压完成仅表示输出核验通过，入库仍按扫描、身份匹配和导入计划执行。
+对影库内明确选定且已获解压授权的单包，提交前核对源 fid、名称、大小及目录范围，仅写入该任务新建的空目录 `解压待整理_…`。记录任务 ID，递归核验输出均位于该目录且不属于影库既有 fid。解压完成仅表示输出核验通过，入库仍按扫描、身份匹配和导入计划执行。
 
 分卷（含 ZIP + Z01）、缺卷、加密或密码、未知格式及会员要求保留具体待处理原因，不自动输入密码、本地解压或推断分卷完整性。认证和风控按[执行范围](headless-design.md#执行范围)处理。无任务 ID 的未知提交不重发；有任务 ID 时通过 `--reconcile` 查询状态与实际输出，不因更换目录或嵌套影库重复提交。隔离测试影库仅允许检查和预览。
+
+解压残留按 `config/headless.json` 的 `archive_cleanup` 处理，回收均指移入夸克回收站，不清空回收站：
+
+| 取值 | 解压核验通过后 | `organize` 完成后 |
+| --- | --- | --- |
+| `keep`（未设置时的默认值） | 全部保留 | 全部保留 |
+| `recycle` | 回收原压缩包；`fetch` 创建的 `压缩包待解压_…` 随后为空时一并回收 | `解压待整理_…` 已无文件时回收 |
+| `ask` | 全部保留，报告中 `cleanup.source.state` 为 `awaiting_choice` | 有可回收项时报告 `cleanup.choices` |
+
+`ask` 模式下 `choices.recycle` 给出的 `archive cleanup` 命令须向用户确认后再执行。`--remove-archive` / `--keep-archive` 仅覆盖本次解压。`archive cleanup` 按原包、转存暂存目录、解压目录的顺序处理已核验解压任务的残留，不要求输出仍在原处：原包的 fid、名称、大小与目录须与解压记录一致；目录须仍为该任务创建（名称与 fid 一致）；暂存目录须在原包确认已回收或不存在后为空，原包结果未知时保留，解压目录不能有文件（可留空子目录），否则保留并说明原因。已被手动删除的项目报告为 `not_found` / `absent`。每项回收意图在请求前落盘，结果未知时只核对真实目录，不重发请求。
 
 执行记录保存在私有 `runtime/archive-jobs.sqlite3`，最新报告为 `runtime/reports/archive-latest.json`。模拟验证与真实操作验收范围见[验证报告](test-report.md)；实际可用格式及账号权益以所选源包的服务端结果为依据。
 
@@ -87,9 +99,9 @@ python3 scripts/media.py archive organize PLAN_ID --plan
 python3 scripts/media.py archive organize PLAN_ID --apply
 ```
 
-`fetch` 仅接受单文件、受支持格式且分享无提取码的候选；带密码的分享不进入任务快照。执行前重新枚举分享并核对 fid、名称及大小，在影库根目录下新建空目录 `压缩包待解压_…`，单次提交转存并持久化任务 ID。结果未知时通过 `--reconcile` 按任务 ID 与实际文件对账，不重复提交。`--extract` 在转存核验通过后执行隔离解压。
+`fetch` 仅接受单文件、受支持格式且分享无提取码的候选；带密码的分享不进入任务快照。执行前重新枚举分享并核对 fid、名称及大小，在影库根目录下新建空目录 `压缩包待解压_…`，单次提交转存并持久化任务 ID。结果未知时通过 `--reconcile` 按任务 ID 与实际文件对账，不重复提交。`--extract` 在转存核验通过后执行隔离解压，原包处理同上，也接受 `--remove-archive` / `--keep-archive`。
 
-`archive plan` 仅读取已核验完成（`EXTRACTED`）的解压输出，按[可选扫描与整理](library-bootstrap.md#可选扫描与整理)识别身份并生成计划。`organize` 执行已授权计划，将视频和关联字幕移动至对应分类并命名；原压缩包、暂存目录及未识别文件保留原位。
+`archive plan` 仅读取已核验完成（`EXTRACTED`）的解压输出，按[可选扫描与整理](library-bootstrap.md#可选扫描与整理)识别身份并生成计划。`organize` 执行已授权计划，将视频和关联字幕移动至对应分类并命名；未识别文件保留原位，原压缩包及暂存目录按 `archive_cleanup` 处理。
 
 ## 单个作品目录原地规范命名
 

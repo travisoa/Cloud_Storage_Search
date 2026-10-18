@@ -2,6 +2,11 @@
 
 Extraction is a staging operation, never a completed library import. Passwords
 and multipart parameters have no proven API contract and are not accepted.
+``source_action`` decides the leftovers of a verified extraction: ``keep``
+leaves them, ``recycle`` moves the source archive and its emptied fetch staging
+folder to the recycle bin (never emptied), and ``ask`` leaves them while
+reporting that the user's choice is awaited. ``cleanup_extraction`` also
+recycles the file-free extraction folder once its output has been organized.
 """
 from __future__ import annotations
 
@@ -229,11 +234,175 @@ def inspect(storage, *, folder_id, library_root_id):
             "writes_attempted": False, "writes_performed": False, "imported": False}
 
 
+SOURCE_ACTIONS = {"keep": "kept", "recycle": "planned", "ask": "ask_after_extraction"}
+_CLEANUP = {"source_cleanup": ("source", "source_archive"),
+            "staging_cleanup": ("staging", "fetch_staging_folder"),
+            "target_cleanup": ("target", "extraction_folder")}
+
+
+def _recycle(storage, state, field, save, report, *, fid, parent_id, can_write):
+    """Send one recycle request for ``fid``, or only observe the one already recorded.
+
+    The intent is persisted before the request and an unknown outcome is never
+    resent; the recycle bin itself is never emptied.
+    """
+    label, cleanup, sent = _CLEANUP[field][1], state.get(field), False
+    if cleanup is None:
+        if not can_write:
+            return {"state": "planned"}
+        if not getattr(storage, "capabilities", {}).get("trash"):
+            return {"state": "kept", "reason": label + "_kept_trash_api_not_available"}
+        state[field] = cleanup = {"state": "recycle_pending", "fid": fid, "parent_id": parent_id}
+        save()
+        report["writes_attempted"] = True
+        try:
+            storage.trash(fid)
+            sent = True
+        except (AuthenticationError, RiskControlError):
+            cleanup.update(state="unknown", reason=label + "_recycle_outcome_unknown")
+            save()
+            raise
+        except Exception:
+            cleanup.update(state="unknown", reason=label + "_recycle_outcome_unknown")
+        report["writes_performed"] = report["writes_performed"] or sent
+    if cleanup["state"] != "recycled":
+        for index in range(3 if sent else 1):
+            if cleanup["fid"] not in {row["fid"] for row in _listing(storage, cleanup["parent_id"])}:
+                cleanup["state"] = "recycled"
+                cleanup.pop("reason", None)
+                break
+            if index < 2 and sent:
+                getattr(storage, "_sleep", lambda delay: None)(0.3)
+        else:
+            cleanup.update(state="unknown", reason=cleanup.get("reason", label + "_recycle_not_yet_observed"))
+        save()
+    return deepcopy(cleanup)
+
+
+def _source_check(storage, library_root_id, source):
+    """None when the recorded source is unchanged in its verified folder."""
+    try:
+        _within(storage, library_root_id, source["parent_id"])
+    except ValueError as exc:
+        if str(exc) != "source_must_be_inside_selected_library":
+            raise
+        return {"state": "not_found", "reason": "source_archive_not_in_recorded_folder"}
+    current = [row for row in _listing(storage, source["parent_id"]) if row["fid"] == source["fid"]]
+    if not current:
+        return {"state": "not_found", "reason": "source_archive_not_in_recorded_folder"}
+    if current != [source]:
+        return {"state": "kept", "reason": "original_archive_no_longer_matches_verified_source"}
+    return None
+
+
+def _folder_check(storage, library_root_id, folder, label, *, nested, ignored_fid=None):
+    """None when ``folder`` is still the job's own directory and holds no files.
+
+    A fetch staging folder must be empty; an extraction folder may keep empty
+    subdirectories after its files were organized away. ``ignored_fid`` lets a
+    preview treat the still-planned source archive as already gone.
+    """
+    rows = [row for row in _listing(storage, library_root_id)
+            if row["fid"] == folder["folder_id"] or row["name"] == folder["name"]]
+    if not rows:
+        return {"state": "absent"}
+    if (len(rows) != 1 or rows[0]["fid"] != folder["folder_id"] or rows[0]["name"] != folder["name"]
+            or not rows[0]["is_dir"]):
+        return {"state": "kept", "reason": label + "_identity_changed"}
+    try:
+        entries = (_inventory(storage, folder["folder_id"], max_entries=10000, max_depth=12)["entries"]
+                   if nested else _listing(storage, folder["folder_id"]))
+    except _Stop:
+        return {"state": "kept", "reason": label + "_inventory_incomplete"}
+    entries = [row for row in entries if row["fid"] != ignored_fid]
+    if (entries and not nested) or any(not row["is_dir"] for row in entries):
+        return {"state": "kept", "reason": label + "_not_empty"}
+    return None
+
+
+def _clean_leftovers(storage, state, save, report, *, library_root_id, staging, include_target,
+                     can_write, recorded_only=False):
+    """Handle the source archive, then the fetch staging folder, then the extraction folder."""
+    source, target = state["bound"]["source"], state["target"]
+    cleanup = report.setdefault("cleanup", {})
+
+    def staging_check():
+        # Recycling the folder would also recycle the archive inside it, so it
+        # waits until the archive is confirmed gone; an unknown outcome is never
+        # resolved by deleting its parent.
+        source_state = cleanup.get("source", {}).get("state")
+        if source_state not in {"recycled", "not_found", "planned"}:
+            return {"state": "kept", "reason": "fetch_staging_folder_waits_for_source_archive"}
+        return _folder_check(storage, library_root_id, staging, "fetch_staging_folder", nested=False,
+                             ignored_fid=source["fid"] if source_state == "planned" else None)
+
+    steps = [("source_cleanup", source["fid"], source["parent_id"],
+              lambda: _source_check(storage, library_root_id, source))]
+    if staging or state.get("staging_cleanup"):
+        steps.append(("staging_cleanup", (staging or {}).get("folder_id"), library_root_id, staging_check))
+    if include_target or state.get("target_cleanup"):
+        steps.append(("target_cleanup", target["folder_id"], library_root_id,
+                      lambda: _folder_check(storage, library_root_id, target, "extraction_folder", nested=True)))
+    for field, fid, parent_id, check in steps:
+        if state.get(field) is None and recorded_only:
+            continue
+        result = None if state.get(field) is not None else check()
+        if result is None:
+            result = _recycle(storage, state, field, save, report, fid=fid, parent_id=parent_id, can_write=can_write)
+        cleanup[_CLEANUP[field][0]] = result
+        if result["state"] in {"kept", "unknown"}:
+            report["reasons"].append(result["reason"])
+    report["source_preserved"] = cleanup.get("source", {}).get("state") != "recycled"
+
+
+def cleanup_extraction(storage, *, journal, job_key, library_root_id, staging=None, apply=False):
+    """Recycle what a verified extraction left behind, independent of later organizing."""
+    report = {"status": "PLAN", "library_root_id": library_root_id, "writes_attempted": False,
+              "writes_performed": False, "source_preserved": True, "reasons": [], "read_only": not apply}
+    state = None
+
+    def save():
+        journal.put(job_key, state)
+
+    try:
+        state = journal.get(job_key)
+        if not isinstance(state, dict) or state.get("kind") != "archive_extract" or state.get("status") != "EXTRACTED":
+            state = None
+            report.update(status="NEEDS_INPUT", reasons=["verified_extraction_required"])
+            return report
+        bound, source = state["bound"], state["bound"]["source"]
+        report.update(source_fid=source["fid"], parent_id=source["parent_id"], name=source["name"],
+                      size=source["size"], target=deepcopy(state.get("target")))
+        if bound.get("library_root_id") != library_root_id or bound.get("account_scope_hash") != _account(storage):
+            report.update(status="NEEDS_INPUT", reasons=["archive_job_belongs_to_another_library_or_account"])
+            return report
+        _clean_leftovers(storage, state, save, report, library_root_id=library_root_id, staging=staging,
+                         include_target=True, can_write=apply)
+        states = {value["state"] for value in report["cleanup"].values()}
+        report["status"] = ("UNKNOWN" if "unknown" in states else "PLAN" if not apply
+                            else "PARTIAL" if states & {"kept", "planned"} else "CLEAN")
+        return report
+    except AuthenticationError:
+        report.update(status="NEEDS_AUTH")
+        report["reasons"].append("cloud_authentication_required")
+    except RiskControlError:
+        report.update(status="RISK_CONTROL")
+        report["reasons"].append("cloud_risk_control_stop")
+    except Exception as exc:
+        recorded = state and any(state.get(field) for field in _CLEANUP)
+        report.update(status="UNKNOWN" if recorded else "NEEDS_INPUT", error_type=type(exc).__name__)
+        report["reasons"].append("archive_cleanup_not_completed")
+    return report
+
+
 def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
-            apply=False, reconcile=False, max_entries=10000, max_depth=12):
+            apply=False, reconcile=False, source_action="keep", staging=None, max_entries=10000, max_depth=12):
+    if source_action not in SOURCE_ACTIONS:
+        raise ValueError("invalid_source_archive_action")
     report = {"status": "PLAN", "source_fid": fid, "parent_id": parent_id,
               "library_root_id": library_root_id, "writes_attempted": False,
               "writes_performed": False, "imported": False, "source_preserved": True,
+              "cleanup": {"mode": source_action, "source": {"state": SOURCE_ACTIONS[source_action]}},
               "new_files": [], "reasons": [], "read_only": not bool(apply and not reconcile)}
     state = None
     can_write = bool(apply and not reconcile)
@@ -277,6 +446,22 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
         if current != [source]:
             raise _Stop("NEEDS_INPUT", "source_archive_identity_changed")
 
+    def cleanup_leftovers():
+        if source_action == "ask" and not any(state.get(field) for field in _CLEANUP):
+            source = state["bound"]["source"]
+            report["cleanup"]["source"] = {"state": "awaiting_choice", "name": source["name"], "size": source["size"]}
+            return
+        try:
+            _clean_leftovers(storage, state, save, report, library_root_id=library_root_id, staging=staging,
+                             include_target=False, can_write=can_write and source_action == "recycle",
+                             recorded_only=source_action != "recycle")
+        except (AuthenticationError, RiskControlError):
+            raise
+        except Exception as exc:
+            # The verified extraction stands; a recorded cleanup is resumed later.
+            report["cleanup"]["error_type"] = type(exc).__name__
+            report["reasons"].append("archive_cleanup_not_completed")
+
     def task_result(result):
         if not isinstance(result, dict) or result.get("task_id") != state.get("task_id"):
             raise _Stop("UNKNOWN", "archive_task_identifier_mismatch")
@@ -319,6 +504,7 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
                 save()
                 report["new_files"] = [by_id[value] for value in fids]
                 report["verified_output_count"] = len(output_ids)
+                cleanup_leftovers()
                 return finish("EXTRACTED")
             if index < 2:
                 getattr(storage, "_sleep", lambda delay: None)(0.3)
@@ -329,6 +515,19 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
         if not isinstance(job_key, str) or not re.fullmatch(r"archive:[0-9a-f]{64}", job_key):
             raise ValueError("stable_archive_job_key_required")
         account = _account(storage)
+        old = journal.get(job_key)
+        if (isinstance(old, dict) and old.get("kind") == "archive_extract" and old.get("status") == "EXTRACTED"
+                and any(old.get(field) for field in _CLEANUP)):
+            # Leftovers were already recycled; the output may be organized away,
+            # so a rerun only continues or observes the recorded cleanup.
+            recorded = (old.get("bound") or {}).get("source") or {}
+            if ((old.get("bound") or {}).get("account_scope_hash") != account
+                    or old["bound"].get("library_root_id") != library_root_id
+                    or recorded.get("fid") != fid or recorded.get("parent_id") != parent_id):
+                return finish("NEEDS_INPUT", "archive_source_or_account_scope_changed")
+            state = deepcopy(old)
+            cleanup_leftovers()
+            return finish("EXTRACTED")
         _within(storage, library_root_id, parent_id)
         rows = _listing(storage, parent_id)
         sources = [row for row in rows if row["fid"] == fid]
@@ -336,7 +535,6 @@ def extract(storage, *, fid, parent_id, library_root_id, journal, job_key,
             return finish("NEEDS_INPUT", "source_archive_identity_or_size_not_verified")
         source = sources[0]
         bound = {"account_scope_hash": account, "library_root_id": library_root_id, "source": source}
-        old = journal.get(job_key)
         if old is not None:
             if not isinstance(old, dict) or old.get("kind") != "archive_extract" or old.get("bound") != bound:
                 return finish("NEEDS_INPUT", "archive_source_or_account_scope_changed")

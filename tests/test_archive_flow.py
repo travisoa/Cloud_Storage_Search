@@ -114,6 +114,16 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(self.storage.saves, [["arc"]])
         self.assertNotIn("secret", repr(self.journal.records))
 
+    def test_rerun_after_archive_recycle_defers_to_the_extraction_job(self):
+        self.assertEqual(self.fetch(apply=True)["status"], "FETCHED")
+        self.storage.folders["root"] = [row for row in self.storage.folders["root"] if row["fid"] != "stage"]
+        self.assertEqual(self.fetch(apply=True)["status"], "UNKNOWN")
+        again = self.fetch(apply=True, archive_recycled=True)
+        self.assertEqual(again["status"], "FETCHED", again)
+        self.assertTrue(again["archive_recycled"])
+        self.assertEqual(again["archive_fid"], "saved-arc")
+        self.assertEqual(self.storage.saves, [["arc"]])
+
     def test_multipart_or_changed_candidate_is_refused(self):
         multi = candidate("multi", "沙丘2.part1.rar")
         self.assertEqual(self.fetch(multi, apply=True)["reasons"], ["only_single_supported_archive_can_be_fetched"])

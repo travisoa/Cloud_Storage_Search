@@ -3,7 +3,7 @@ from copy import deepcopy
 import json
 import unittest
 
-from media_helper.archives import classify_archive, classify_archives, extract, inspect
+from media_helper.archives import classify_archive, classify_archives, cleanup_extraction, extract, inspect
 from media_helper.providers import AuthenticationError, ProviderError, QuarkProvider, RiskControlError, UnknownOutcome
 from tests.test_library_init import Journal
 from tests.test_providers import FakeTransport
@@ -15,7 +15,7 @@ def item(fid, name, parent="source", size=123, directory=False):
 
 class ArchiveStorage:
     account_scope = "quark:account-one"
-    capabilities = {"archive_extract": True}
+    capabilities = {"archive_extract": True, "trash": True}
     _sleep = staticmethod(lambda seconds: None)
 
     def __init__(self, journal=None):
@@ -27,6 +27,7 @@ class ArchiveStorage:
         self.mkdir_failure = self.extract_failure = None
         self.skip_callback = False
         self.result = {"task_id": "task1", "status": "done", "extracted_fids": ["output1"]}
+        self.trashed, self.trash_failure, self.trash_delayed = [], None, False
 
     def list_files(self, parent):
         rows = deepcopy(self.rows[parent])
@@ -62,6 +63,22 @@ class ArchiveStorage:
     def archive_task_status(self, task_id):
         self.queries.append(task_id)
         return deepcopy(self.result)
+
+    def trash(self, fid):
+        if self.journal:
+            last = self.journal.events[-1]
+            assert any((last.get(field) or {}).get("state") == "recycle_pending" and last[field]["fid"] == fid
+                       for field in ("source_cleanup", "staging_cleanup", "target_cleanup")), last
+        self.trashed.append(fid)
+        if self.trash_failure:
+            raise self.trash_failure
+        if not self.trash_delayed:
+            self.remove(fid)
+        return {"fid": fid, "status": "submitted"}
+
+    def remove(self, fid):
+        for parent, rows in self.rows.items():
+            self.rows[parent] = [row for row in rows if row["fid"] != fid]
 
 
 class ArchiveInspectionTests(unittest.TestCase):
@@ -382,6 +399,182 @@ class ArchiveExtractionTests(unittest.TestCase):
         self.assertIn("password_required", report["reasons"])
         self.assertFalse(report["imported"])
         self.assertEqual(len(self.storage.submissions), 1)
+
+
+class ArchiveLeftoverCleanupTests(unittest.TestCase):
+    STAGING = {"folder_id": "source", "name": "待处理"}
+
+    def setUp(self):
+        self.journal = Journal()
+        self.storage = ArchiveStorage(self.journal)
+        self.key = "archive:" + "a" * 64
+
+    def run_archive(self, **options):
+        return extract(self.storage, fid="archive1", parent_id="source", library_root_id="root",
+                       journal=self.journal, job_key=self.key, **options)
+
+    def cleanup(self, **options):
+        return cleanup_extraction(self.storage, journal=self.journal, job_key=self.key,
+                                  library_root_id="root", **options)
+
+    def states(self, report):
+        return {key: value["state"] for key, value in report["cleanup"].items() if isinstance(value, dict)}
+
+    def test_recycle_removes_archive_and_its_emptied_staging_folder_once(self):
+        report = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(report["status"], "EXTRACTED", report)
+        self.assertEqual(self.states(report), {"source": "recycled", "staging": "recycled"})
+        self.assertFalse(report["source_preserved"])
+        self.assertEqual(self.storage.trashed, ["archive1", "source"])
+        self.assertEqual([row["fid"] for row in self.storage.rows["root"]], ["isolated1"])
+        again = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(again["status"], "EXTRACTED", again)
+        self.assertEqual(self.states(again), {"source": "recycled", "staging": "recycled"})
+        self.assertFalse(again["writes_attempted"])
+        self.assertEqual((self.storage.trashed, len(self.storage.submissions)), (["archive1", "source"], 1))
+
+    def test_folder_not_created_by_fetch_or_not_empty_is_kept(self):
+        report = self.run_archive(apply=True, source_action="recycle")
+        self.assertEqual(self.states(report), {"source": "recycled"})
+        self.setUp()
+        self.storage.rows["source"].append(item("note", "说明.txt"))
+        report = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(self.states(report), {"source": "recycled", "staging": "kept"})
+        self.assertIn("fetch_staging_folder_not_empty", report["reasons"])
+        self.assertEqual(self.storage.trashed, ["archive1"])
+
+    def test_keep_is_default_and_ask_waits_for_a_choice(self):
+        report = self.run_archive(apply=True, staging=self.STAGING)
+        self.assertEqual(report["cleanup"], {"mode": "keep", "source": {"state": "kept"}})
+        self.assertTrue(report["source_preserved"])
+        asked = self.run_archive(apply=True, source_action="ask", staging=self.STAGING)
+        self.assertEqual(asked["status"], "EXTRACTED", asked)
+        self.assertEqual(asked["cleanup"]["source"], {"state": "awaiting_choice", "name": "测试剧.zip", "size": 123})
+        self.assertEqual(self.storage.trashed, [])
+        with self.assertRaises(ValueError):
+            self.run_archive(apply=True, source_action="delete")
+
+    def test_plan_reconcile_and_failed_extraction_never_recycle(self):
+        self.assertEqual(self.run_archive(source_action="recycle")["cleanup"]["source"]["state"], "planned")
+        self.run_archive(apply=True)
+        checked = self.run_archive(apply=True, reconcile=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(checked["status"], "EXTRACTED", checked)
+        self.assertEqual(self.states(checked), {"source": "planned", "staging": "planned"})
+        self.setUp()
+        self.storage.result = {"task_id": "task1", "status": "failed", "extracted_fids": [], "reason": "password_required"}
+        self.assertEqual(self.run_archive(apply=True, source_action="recycle")["status"], "NEEDS_INPUT")
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_unknown_recycle_is_never_resent(self):
+        self.storage.trash_failure = UnknownOutcome("cookie=secret")
+        report = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(report["status"], "EXTRACTED", report)
+        self.assertEqual(self.states(report), {"source": "unknown", "staging": "kept"})
+        self.assertIn("source_archive_recycle_outcome_unknown", report["reasons"])
+        self.assertNotIn("secret", json.dumps(report))
+        self.storage.trash_failure = None
+        for options in ({"apply": True, "source_action": "recycle"}, {"reconcile": True}):
+            again = self.run_archive(**options)
+            self.assertEqual(again["cleanup"]["source"]["state"], "unknown", again)
+        self.assertEqual(self.cleanup(apply=True)["status"], "UNKNOWN")
+        self.assertEqual(self.storage.trashed, ["archive1"])
+        self.storage.remove("archive1")
+        self.assertEqual(self.run_archive(reconcile=True)["cleanup"]["source"]["state"], "recycled")
+
+    def test_staging_folder_waits_while_the_archive_outcome_is_unknown(self):
+        # The archive stays listed through every recycle poll, then a lagging
+        # listing shows the folder empty: its parent must still not be recycled.
+        self.storage.trash_delayed = True
+        original, polls = self.storage.list_files, []
+        def lagging(parent):
+            rows = original(parent)
+            if parent == "source" and self.storage.trashed:
+                polls.append(parent)
+                if len(polls) > 3:
+                    rows = [row for row in rows if row["fid"] != "archive1"]
+            return rows
+        self.storage.list_files = lagging
+        report = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(self.states(report), {"source": "unknown", "staging": "kept"}, report)
+        self.assertIn("fetch_staging_folder_waits_for_source_archive", report["reasons"])
+        self.assertEqual(self.storage.trashed, ["archive1"])
+        self.storage.list_files, self.storage.trash_delayed = original, False
+        self.storage.remove("archive1")
+        done = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual({key: done["cleanup"][key]["state"] for key in ("source", "staging")},
+                         {"source": "recycled", "staging": "recycled"}, done)
+        self.assertEqual(self.storage.trashed, ["archive1", "source"])
+
+    def test_delayed_disappearance_is_reported_until_observed(self):
+        self.storage.trash_delayed = True
+        report = self.run_archive(apply=True, source_action="recycle")
+        self.assertEqual(report["cleanup"]["source"]["state"], "unknown", report)
+        self.assertIn("source_archive_recycle_not_yet_observed", report["reasons"])
+        self.storage.remove("archive1")
+        self.assertEqual(self.cleanup()["cleanup"]["source"]["state"], "recycled")
+        self.assertEqual(self.storage.trashed, ["archive1"])
+
+    def test_authentication_during_recycle_stops_without_resending(self):
+        self.storage.trash_failure = AuthenticationError("cookie=secret")
+        self.assertEqual(self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)["status"],
+                         "NEEDS_AUTH")
+        self.storage.trash_failure = None
+        again = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(again["cleanup"]["source"]["state"], "unknown", again)
+        self.assertEqual(self.storage.trashed, ["archive1"])
+
+    def test_without_trash_capability_everything_is_kept(self):
+        self.storage.capabilities = {"archive_extract": True}
+        report = self.run_archive(apply=True, source_action="recycle", staging=self.STAGING)
+        self.assertEqual(report["status"], "EXTRACTED", report)
+        self.assertEqual(self.states(report), {"source": "kept", "staging": "kept"})
+        self.assertIn("source_archive_kept_trash_api_not_available", report["reasons"])
+        self.assertTrue(report["source_preserved"])
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_cleanup_recycles_extraction_folder_only_after_its_files_are_organized(self):
+        self.assertEqual(self.cleanup(apply=True)["reasons"], ["verified_extraction_required"])
+        self.run_archive(apply=True)
+        planned = self.cleanup(staging=self.STAGING)
+        self.assertEqual(planned["status"], "PLAN", planned)
+        self.assertEqual(self.states(planned), {"source": "planned", "staging": "planned", "target": "kept"})
+        first = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual(first["status"], "PARTIAL", first)
+        self.assertEqual(self.states(first), {"source": "recycled", "staging": "recycled", "target": "kept"})
+        self.assertIn("extraction_folder_not_empty", first["reasons"])
+        self.storage.rows["isolated1"] = [item("empty-dir", "展开目录", "isolated1", directory=True)]
+        self.storage.rows["empty-dir"] = []
+        done = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual(done["status"], "CLEAN", done)
+        self.assertEqual(self.storage.trashed, ["archive1", "source", "isolated1"])
+        again = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual(again["status"], "CLEAN", again)
+        self.assertFalse(again["writes_attempted"])
+        self.assertEqual(len(self.storage.trashed), 3)
+
+    def test_cleanup_after_manual_deletion_has_nothing_to_recycle(self):
+        self.run_archive(apply=True)
+        self.storage.remove("archive1")
+        self.storage.remove("source")
+        self.storage.remove("isolated1")
+        report = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual(report["status"], "CLEAN", report)
+        self.assertEqual(self.states(report), {"source": "not_found", "staging": "absent", "target": "absent"})
+        self.assertEqual(self.storage.trashed, [])
+
+    def test_cleanup_requires_unchanged_source_folders_and_same_account(self):
+        self.run_archive(apply=True)
+        self.storage.rows["source"][0]["size"] = 999
+        self.storage.rows["isolated1"] = []
+        self.storage.rows["root"][-1]["name"] = "已改名"
+        report = self.cleanup(apply=True, staging=self.STAGING)
+        self.assertEqual(self.states(report), {"source": "kept", "staging": "kept", "target": "kept"}, report)
+        self.assertEqual(report["status"], "PARTIAL")
+        self.assertIn("original_archive_no_longer_matches_verified_source", report["reasons"])
+        self.assertIn("extraction_folder_identity_changed", report["reasons"])
+        self.storage.account_scope = "quark:another"
+        self.assertEqual(self.cleanup(apply=True)["reasons"], ["archive_job_belongs_to_another_library_or_account"])
+        self.assertEqual(self.storage.trashed, [])
 
 
 if __name__ == "__main__":

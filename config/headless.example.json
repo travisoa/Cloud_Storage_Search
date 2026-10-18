@@ -9,6 +9,7 @@
   "overwrite": false,
   "delete": false,
   "rename_existing_files": false,
+  "archive_cleanup": "keep",
   "open_browser": false,
   "credential_source": {
     "type": "file"
