@@ -25,6 +25,13 @@ from .workflow import (_digest, _directory, _directory_identity, _error, _fid, _
 
 
 _MOVIE_CATEGORY_NAMES = {"电影", "電影", "movie", "movies", "film", "films"}
+_MOVIE_SUBCATEGORY_NAMES = {"华语", "华语电影", "国语", "国产", "国产电影", "国产片", "内地", "内地电影", "大陆",
+                            "大陆电影", "港台", "港台电影", "香港", "香港电影", "港片", "台湾", "台湾电影", "欧美",
+                            "欧美电影", "美国", "美国电影", "英国", "欧洲", "日韩", "日韩电影", "日本", "日本电影",
+                            "韩国", "韩国电影", "亚洲", "泰国", "泰国电影", "印度", "印度电影", "外语", "外语片",
+                            "外国", "海外", "其他", "其他地区", "动画", "动画电影", "动漫", "纪录片", "纪录",
+                            "chinese", "western", "asian", "japanese", "korean", "animation", "documentary"}
+_MOVIE_YEAR_GROUP = re.compile(r"(?:19|20)\d{2}(?:年)?(?:电影|新片|上映)?")
 _EXTRA = re.compile(r"(?<![a-z])(?:sample|trailer|teaser|featurette|extras?|making[ ._-]?of)(?![a-z])|"
                     r"预告|預告|花絮|片花|彩蛋|幕后|幕後|特辑|特輯|删减片段|刪減片段", re.I)
 _MULTIPART = re.compile(r"(?<![a-z0-9])(?:cd|disc|disk|part|pt)[ ._-]?\d{1,2}(?![0-9])|上部|下部|上集|下集", re.I)
@@ -117,16 +124,60 @@ def _names_title(name, title):
     return False
 
 
+def _movie_group(name):
+    """Region, type or year folders that hold movies rather than being one."""
+    key = _normal(name)
+    return key in _MOVIE_CATEGORY_NAMES | _MOVIE_SUBCATEGORY_NAMES or bool(_MOVIE_YEAR_GROUP.fullmatch(key))
+
+
+def _movie_directories(storage, category, related, *, max_depth=3, max_entries=10000):
+    """Locate a movie by folder names without opening unrelated movie folders.
+
+    Every folder on an opened level is kept for the identity checks. Group
+    folders (regions, types, years) are opened first, and a level that
+    already holds the title is not searched further. Absence is concluded
+    only after undated, unrecognized folders (collections, other groupings)
+    were opened as well; dated folders are works and stay closed.
+    """
+    result, deferred = [], []
+
+    def scan(parent, path, depth):
+        rows = [dict(item, parent_id=parent, path=posixpath.join(path, _name(item)))
+                for item in _list(storage, parent) if _directory(item)]
+        result.extend(rows)
+        if len(result) > max_entries:
+            raise ValueError("inventory_limit_reached")
+        if any(related(row) for row in rows):
+            return
+        for row in rows:
+            group = _movie_group(_name(row))
+            if not group and _directory_identity(_name(row))[1] is not None:
+                continue
+            if depth + 1 >= max_depth:
+                row["scan_depth_limit"] = True
+            elif group:
+                scan(_fid(row), row["path"], depth + 1)
+            else:
+                deferred.append((row, depth + 1))
+
+    scan(_fid(category), "", 0)
+    while deferred and not any(related(row) for row in result):
+        row, depth = deferred.pop(0)
+        scan(_fid(row), row["path"], depth)
+    return result
+
+
 def _existing(request, storage, category, report):
     """Return (destination folder, existing videos) or NEEDS_INPUT on ambiguity."""
     year = int(request["year"])
     keys = {_directory_identity(title)[0] for title in _titles(request)}
-    directories = _walk(storage, _fid(category), directories_only=True, max_depth=3)
-    related = []
-    for row in directories:
+
+    def is_related(row):
         core, found_year = _directory_identity(_name(row))
-        if core in keys and found_year in {None, year}:
-            related.append(row)
+        return core in keys and found_year in {None, year}
+
+    directories = _movie_directories(storage, category, is_related)
+    related = [row for row in directories if is_related(row)]
     # Qualified/unrecognized names are evidence of a possible existing work,
     # not permission to create a parallel directory or reuse that directory.
     # Folders inside a work folder (a matched one, or any with a final year)

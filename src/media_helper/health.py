@@ -10,7 +10,7 @@ import re
 import unicodedata
 
 from .catalog import build_episode_inventory, calculate_missing, parse_file
-from .library_import import _error, _id, scan
+from .library_import import _account, _error, _id, _listing, scan
 from .library_identity import _QUALITY
 from .planner import _SE
 
@@ -65,20 +65,74 @@ def _archive_parts(name):
     return lower, "single", None, None
 
 
+def _folder_snapshot(storage, root, selected, *, categories, excluded_ids, max_entries, max_depth):
+    """Locate ``selected`` by directory listings, then scan only that folder.
+
+    The ancestors become ordinary directory entries with library-relative
+    paths, so the checks below see the same context as a root scan.
+    """
+    from .tidy import OutsideLibrary, ancestry
+    preferred = [value.get("folder_id") if isinstance(value, dict) else value
+                 for value in (categories.values() if isinstance(categories, dict) else ())]
+    budget = [max_entries]
+
+    def bounded(storage, parent):
+        # Locating and scanning share one entry budget, like a root scan.
+        rows = _listing(storage, parent)
+        budget[0] -= len(rows)
+        if budget[0] < 0:
+            raise ValueError("scan_entry_limit_exceeded")
+        return rows
+
+    try:
+        chain = ancestry(storage, root, selected, preferred=preferred, excluded=excluded_ids, listing=bounded)
+        if budget[0] < 1:
+            raise ValueError("scan_entry_limit_exceeded")
+    except OutsideLibrary:
+        chain = None
+    except Exception as exc:
+        status, reason = _error(exc)
+        return {"status": status, "complete": False, "entries": [], "errors": [{"reason": reason}],
+                "excluded_ids": sorted({_id(value) for value in excluded_ids}), "account_scope_hash": _account(storage),
+                "limits": {"max_entries": max_entries, "max_depth": max_depth}}
+    if chain is None:
+        return {"status": "COMPLETE", "complete": True, "entries": [], "errors": [],
+                "excluded_ids": sorted({_id(value) for value in excluded_ids}), "account_scope_hash": _account(storage),
+                "limits": {"max_entries": max_entries, "max_depth": max_depth}}
+    snapshot = scan(storage, source_id=selected, excluded_ids=excluded_ids,
+                    max_entries=budget[0], max_depth=max(max_depth - len(chain), 0))
+    snapshot["limits"] = {"max_entries": max_entries, "max_depth": max_depth}
+    names, upper = [row["name"] for row in chain], []
+    for index, row in enumerate(chain):
+        upper.append({**row, "size": 0, "path": "/".join(names[:index + 1]),
+                      "parent_path": "/".join(names[:index]), "kind": "directory"})
+    prefix = upper[-1]["path"]
+    for row in snapshot["entries"]:
+        row["parent_path"] = posixpath.join(prefix, row["parent_path"]) if row["parent_path"] else prefix
+        row["path"] = posixpath.join(prefix, row["path"])
+    snapshot["entries"] = upper + snapshot["entries"]
+    return snapshot
+
+
 def inspect(storage, *, library_root_id, categories, resolver=None, metadata=None,
             excluded_ids=(), folder_id=None, max_entries=10000, max_depth=12, as_of=None):
     """Inspect a bounded authorized tree using listings only.
 
-    A selected subfolder is accepted only after its ancestry is proven by the
-    root scan. ``resolver(file, context)`` may return an exact MATCHED identity;
-    schedule checks use its ``providers`` or the optional metadata provider.
-    The report never implies byte integrity, playback, or a confirmed release.
+    A selected subfolder is accepted only after its ancestry is observed by
+    directory listings; then only that folder is scanned. ``resolver(file,
+    context)`` may return an exact MATCHED identity; schedule checks use its
+    ``providers`` or the optional metadata provider. The report never implies
+    byte integrity, playback, or a confirmed release.
     """
     root = _id(library_root_id)
     selected = _id(folder_id) if folder_id is not None else root
     checked = _stamp(as_of)
-    snapshot = scan(storage, source_id=root, excluded_ids=excluded_ids,
-                    max_entries=max_entries, max_depth=max_depth)
+    if selected == root:
+        snapshot = scan(storage, source_id=root, excluded_ids=excluded_ids,
+                        max_entries=max_entries, max_depth=max_depth)
+    else:
+        snapshot = _folder_snapshot(storage, root, selected, categories=categories, excluded_ids=excluded_ids,
+                                    max_entries=max_entries, max_depth=max_depth)
     metadata_requested = resolver is not None or metadata is not None
     if resolver is None and metadata is not None:
         from .library_identity import MediaResolver

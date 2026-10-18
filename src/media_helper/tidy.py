@@ -34,16 +34,33 @@ def _fold(value):
     return str(value).casefold()
 
 
-def ancestry(storage, root, folder, *, limit=10000):
-    """Return the observed directory chain from below the root down to ``folder``."""
-    root, folder = _id(root), _id(folder)
+class OutsideLibrary(ValueError):
+    """Every reachable folder was listed and the selected one is not among them."""
+
+
+def _group_folder(name):
+    from .movie_workflow import _movie_group
+    from .workflow import _tv_group
+    return _tv_group(name) or _movie_group(name)
+
+
+def ancestry(storage, root, folder, *, limit=10000, preferred=(), excluded=(), listing=None):
+    """Return the observed directory chain from below the root down to ``folder``.
+
+    Configured categories and group folders (regions, years) are opened
+    before other folders, so a work is usually found without listing its
+    peers; every other folder is still searched before giving up.
+    """
+    root, folder = (_id(root), _id(folder)) if listing is None else (str(root), str(folder))
+    listing = listing or _listing
     if folder == root:
         raise ValueError("请选择具体作品目录，而不是影库根目录")
-    parents, queue, seen = {}, deque([root]), {root}
-    while queue:
-        parent = queue.popleft()
-        for row in _listing(storage, parent):
-            if not row["is_dir"]:
+    preferred, excluded = {str(value) for value in preferred}, {str(value) for value in excluded}
+    parents, seen, first, rest = {}, {root}, deque([root]), deque()
+    while first or rest:
+        parent = (first or rest).popleft()
+        for row in listing(storage, parent):
+            if not row["is_dir"] or row["fid"] in excluded:
                 continue
             if row["fid"] in seen or len(seen) >= limit:
                 raise ValueError("目录范围核验存在循环或超出上限")
@@ -56,8 +73,19 @@ def ancestry(storage, root, folder, *, limit=10000):
                     if cursor["parent_id"] == root:
                         return list(reversed(chain))
                     cursor = parents[cursor["parent_id"]]
-            queue.append(row["fid"])
-    raise ValueError("所选目录不在当前影库范围内")
+            (first if row["fid"] in preferred or _group_folder(row["name"]) else rest).append(row["fid"])
+    raise OutsideLibrary("所选目录不在当前影库范围内")
+
+
+def verify_chain(storage, root, chain):
+    """Recheck a recorded chain by listing only its own folders, top down."""
+    parent = str(root)
+    for step in chain:
+        rows = [row for row in _listing(storage, parent) if row["fid"] == step["fid"]]
+        if (step["parent_id"] != parent or len(rows) != 1 or not rows[0]["is_dir"]
+                or rows[0]["name"] != step["name"]):
+            raise ValueError("作品目录位置或名称已变化，请重新生成计划")
+        parent = step["fid"]
 
 
 def _tree(storage, folder, *, max_entries, max_depth):
@@ -123,7 +151,9 @@ def _plan_payload(report):
 def plan_tidy(storage, *, folder_id, library_root_id, categories, kind=None, include_media_tags=True,
               max_entries=5000, max_depth=4):
     """Read-only proposal for one folder; nothing is written to cloud or journal."""
-    chain = ancestry(storage, library_root_id, folder_id)
+    category_ids = [value.get("folder_id") if isinstance(value, dict) else value
+                    for value in (categories or {}).values()]
+    chain = ancestry(storage, library_root_id, folder_id, preferred=category_ids)
     folder = chain[-1]
     if len(chain) < 2:
         raise ValueError("所选目录是分类目录；请选择分类下的具体作品目录")
@@ -299,9 +329,9 @@ def apply_tidy(plan, storage, *, journal, job_key, apply=False):
     def persist():
         journal.put(job_key, state)
 
-    chain = ancestry(storage, plan["library_root_id"], plan["folder"]["fid"])
-    if [{"fid": row["fid"], "name": row["name"], "parent_id": row["parent_id"]} for row in chain] != plan["chain"]:
+    if not plan["chain"] or plan["chain"][-1]["fid"] != plan["folder"]["fid"]:
         raise ValueError("作品目录位置或名称已变化，请重新生成计划")
+    verify_chain(storage, plan["library_root_id"], plan["chain"])
     pending = {fid: record for fid, record in state["files"].items() if record.get("state") in {"intent", "returned"}}
     if pending:
         # Unknown rename results are only observed in this run.

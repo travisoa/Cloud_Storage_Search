@@ -29,6 +29,7 @@ _TV_SUBCATEGORY_NAMES = {"国产剧", "国产电视剧", "国产", "国剧", "�
                          "大陆剧", "大陆电视剧", "华语剧", "港台剧", "港剧", "台剧", "欧美剧",
                          "美剧", "英剧", "日剧", "韩剧", "日韩剧", "日韩", "泰剧", "海外剧",
                          "其他剧", "其他", "完结剧", "已完结", "连载剧", "连载中", "正在更新"}
+_TV_YEAR_GROUP = re.compile(r"(?:19|20)\d{2}(?:年)?(?:剧集|电视剧|新剧|更新)?")
 
 
 def _digest(value):
@@ -51,6 +52,12 @@ def _directory(file):
 def _normal(value):
     return "".join(c for c in unicodedata.normalize("NFKC", str(value)).casefold()
                    if c.isalnum())
+
+
+def _tv_group(name):
+    """TV category, region or year folders that hold shows rather than being one."""
+    key = _normal(name)
+    return key in _TV_CATEGORY_NAMES | _TV_SUBCATEGORY_NAMES or bool(_TV_YEAR_GROUP.fullmatch(key))
 
 
 def _safe_file(file):
@@ -273,9 +280,7 @@ def _library_directories(request, storage, root):
         return _directory_identity(_name(row))[0] in titles
 
     def subcategory(row):
-        name = _normal(_name(row))
-        return name in _TV_CATEGORY_NAMES | _TV_SUBCATEGORY_NAMES or bool(
-            re.fullmatch(r"(?:19|20)\d{2}(?:年)?(?:剧集|电视剧|新剧|更新)?", name))
+        return _tv_group(_name(row))
 
     def scan_category(parent, path, depth, stop_after_listing=False):
         rows = [dict(item, parent_id=parent, path=posixpath.join(path, _name(item)), discovery_depth=depth + 1)

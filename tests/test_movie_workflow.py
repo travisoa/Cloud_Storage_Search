@@ -150,6 +150,24 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(self.search.calls, 0)
         self.assertFalse(report["writes_attempted"])
 
+    def test_movie_in_region_folder_is_found_without_opening_other_movies(self):
+        self.storage.folders["movies"].append(file("west", "欧美", "movies", directory=True))
+        self.storage.folders["west"] = [file("dune", "沙丘2 (2024)", "west", directory=True)]
+        self.storage.folders["dune"] = [file("have", "Dune2.mkv", "dune")]
+        del self.storage.folders["other"]  # 星际穿越 (2014) is never opened
+        report = run(request(), self.storage, self.search, self.journal, apply=True)
+        self.assertEqual(report["status"], "UP_TO_DATE", report)
+        self.assertEqual(self.search.calls, 0)
+
+    def test_movie_in_unrecognized_collection_folder_is_still_found(self):
+        self.storage.folders["movies"].append(file("set", "科幻合集", "movies", directory=True))
+        self.storage.folders["set"] = [file("dune", "沙丘2 (2024)", "set", directory=True)]
+        self.storage.folders["dune"] = [file("have", "Dune2.mkv", "dune")]
+        del self.storage.folders["other"]  # dated works stay closed
+        report = run(request(), self.storage, self.search, self.journal, apply=True)
+        self.assertEqual(report["status"], "UP_TO_DATE", report)
+        self.assertEqual((self.storage.created, self.storage.saved), ([], []))
+
     def test_existing_empty_year_folder_is_reused_and_keeps_its_name_as_prefix(self):
         self.storage.folders["movies"].append(file("dune", "沙丘2 (2024)", "movies", directory=True))
         self.storage.folders["dune"] = []

@@ -222,6 +222,25 @@ class HealthTests(unittest.TestCase):
         self.assertEqual(report['status'], 'HEALTHY', report)
         self.assertEqual(report['coverage']['video_files'], 1)
 
+    def test_selected_folder_is_located_by_directories_and_scanned_alone(self):
+        self.storage.rows['movie'] = [folder('film', '星际穿越 (2014)', 'movie')]
+        self.storage.rows['film'] = AssertionError('unrelated movie folder read')
+        self.storage.rows['show'].append(folder('season2', 'Season 02', 'show'))
+        self.storage.rows['season2'] = AssertionError('sibling season read')
+        report = self.inspect(folder_id='season')
+        self.assertEqual(report['status'], 'HEALTHY', report)
+        self.assertTrue(report['coverage']['scope_verified'])
+        self.assertNotIn('film', self.storage.listed)
+        self.assertNotIn('season2', self.storage.listed)
+
+    def test_locating_a_folder_counts_against_the_entry_limit(self):
+        report = self.inspect(folder_id='season', max_entries=3)
+        self.assertEqual(report['status'], 'INCOMPLETE', report)
+        self.assertFalse(report['coverage']['scan_complete'])
+        self.assertNotIn('season', self.storage.listed)
+        report = self.inspect(folder_id='season', max_entries=5)
+        self.assertEqual(report['status'], 'HEALTHY', report)
+
     def test_empty_selected_season_does_not_claim_whole_work_empty(self):
         self.storage.rows['show'].append(folder('season2', 'Season 02', 'show'))
         self.storage.rows['season2'] = []

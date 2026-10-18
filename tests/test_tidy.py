@@ -191,6 +191,23 @@ class TidyTests(unittest.TestCase):
         done = apply_tidy(plan, self.storage, journal=self.journal, job_key="t", apply=True)
         self.assertEqual(done["status"], "COMPLETE", done)
 
+    def test_plan_opens_group_folders_first_and_apply_rechecks_only_the_chain(self):
+        # "other" has no listing: opening an unrelated work would raise.
+        self.storage.folders["tv"].insert(0, row("other", "他剧 (2025)", "tv", directory=True))
+        self.storage.folders["kr"] = [row("kshow", "韩剧作品 (2024)", "kr", directory=True)]
+        self.storage.folders["kshow"] = [row("k1", "韩剧作品.S01E01.mp4", "kshow")]
+        reads = []
+        original = self.storage.list_files
+        self.storage.list_files = lambda parent: (reads.append(parent), original(parent))[1]
+        plan = self.plan("kshow")
+        self.assertEqual([step["fid"] for step in plan["chain"]], ["tv", "kr", "kshow"])
+        self.assertNotIn("other", reads)
+        reads.clear()
+        result = apply_tidy(plan, self.storage, journal=self.journal, job_key="t", apply=True)
+        self.assertEqual(result["status"], "COMPLETE", result)
+        self.assertEqual(reads.count("tv"), 1)
+        self.assertNotIn("show", reads)
+
     def test_moved_folder_invalidates_plan(self):
         plan = self.plan()
         self.storage.folders["tv"][0]["name"] = "嫁金钗"
