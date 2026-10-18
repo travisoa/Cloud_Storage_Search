@@ -62,6 +62,20 @@ class ResolverTests(unittest.TestCase):
         result = self.resolve("Example.Show.2026.S01E01.1080p.mkv")
         self.assertEqual(result["title"], "示例剧")
 
+    def test_compact_english_name_uses_matching_folder_year_and_exact_episode(self):
+        result = self.resolve("Example ShowS01E02_2160P_DV_DDP5.1.mkv",
+                              ancestors=["Example Show (2026)", "Season 01"])
+        self.assertEqual((result["status"], result["kind"], result["title"],
+                          result["season"], result["episode"]),
+                         ("MATCHED", "tv", "示例剧", 1, 2))
+
+    def test_movie_new_suffixes_preserve_identity_when_resolution_is_unknown(self):
+        for suffix in ("DV_DDP5.1", "SDR", "HLG_TrueHD7.1.Atmos", "DDP5.1", "TrueHD7.1.Atmos"):
+            with self.subTest(suffix=suffix):
+                result = self.resolve(f"Example Movie (2025)_{suffix}.mkv")
+                self.assertEqual((result["status"], result.get("kind"), result.get("title")),
+                                 ("MATCHED", "movie", "示例电影"), result)
+
     def test_chinese_explicit_season_episode(self):
         result = self.resolve("示例剧 (2026) 第1季第2集.mkv")
         self.assertEqual((result["status"], result["season"], result["episode"]), ("MATCHED", 1, 2))
@@ -110,6 +124,27 @@ class ResolverTests(unittest.TestCase):
     def test_tv_category_does_not_turn_unmarked_video_into_movie(self):
         result = self.resolve("示例剧 (2026).mkv", ancestors=["电视剧"])
         self.assertEqual(result["reason"], "explicit_season_and_episode_required")
+
+    def test_scan_root_tv_context_and_region_names_preserve_tv_classification(self):
+        for context in ({"kind": "tv"}, {"ancestors": ["韩剧"]}):
+            with self.subTest(context=context):
+                result = self.resolve("示例电影 (2025).mkv", **context)
+                self.assertEqual(result["reason"], "explicit_season_and_episode_required")
+        self.assertEqual(self.metadata.calls, [])
+
+    def test_short_numeric_title_uses_explicit_filename_or_folder_year(self):
+        self.metadata.tv[0].update(title="24", original_title="24", year=2001)
+        for name in ("24 (2001)S01E01.mkv", "24.S01E01.mkv"):
+            with self.subTest(name=name):
+                result = self.resolve(name, ancestors=["24 (2001)", "Season 01"])
+                self.assertEqual((result["status"], result["kind"], result["year"]), ("MATCHED", "tv", 2001))
+        self.assertEqual(self.resolve("24.S01E01.mkv")["reason"], "title_and_release_year_required")
+        self.assertEqual(self.resolve("24.mkv", ancestors=["24 (2001)"])["reason"], "explicit_season_and_episode_required")
+
+    def test_explicit_movie_context_rejects_episode_markers(self):
+        result = self.resolve("示例剧 (2026) S01E01.mkv", kind="movie")
+        self.assertEqual(result["reason"], "filename_and_directory_kind_conflict")
+        self.assertFalse(self.metadata.calls)
 
     def test_episode_must_exist_and_not_be_duplicate_or_special(self):
         for season in ([{"season": 1, "episode": 3}], [{"season": 1, "episode": 1}] * 2, [{"season": 1, "episode": 1, "is_special": True}]):

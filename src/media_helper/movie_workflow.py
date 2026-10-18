@@ -16,10 +16,12 @@ from . import catalog
 from .naming import media_info, movie_filename, quality_score, series_prefix
 from .planner import _subtitle_suffix
 from .providers import AuthenticationError, RiskControlError
-from .sources import safe_source, source_ref
+from .recovery import _valid_operation, _verify_operation
+from .sources import safe_source, source_digest, source_ref
 from .workflow import (_digest, _directory, _directory_identity, _error, _fid, _list, _name, _needs,
                        _observe_created_directory, _put, _record_directory_verification,
-                       _rename_verified, _resume, _safe_file, _share_tree, _walk, _normal, _collision)
+                       _rename_verified, _resume, _safe_file, _share_tree, _walk, _normal, _collision,
+                       legacy_scope_details, legacy_scope_record)
 
 
 _MOVIE_CATEGORY_NAMES = {"电影", "電影", "movie", "movies", "film", "films"}
@@ -97,6 +99,24 @@ def _category(request, storage, report):
     return matches[0]
 
 
+def _names_title(name, title):
+    """A Latin title counts only as a whole word; CJK text has no word boundary."""
+    text = unicodedata.normalize("NFKC", name).casefold()
+    key = unicodedata.normalize("NFKC", title).strip().casefold()
+
+    def word(char):
+        return char.isascii() and char.isalnum()
+
+    start = text.find(key) if key else -1
+    while start >= 0:
+        end = start + len(key)
+        if not ((word(key[0]) and start and word(text[start - 1]))
+                or (word(key[-1]) and end < len(text) and word(text[end]))):
+            return True
+        start = text.find(key, start + 1)
+    return False
+
+
 def _existing(request, storage, category, report):
     """Return (destination folder, existing videos) or NEEDS_INPUT on ambiguity."""
     year = int(request["year"])
@@ -107,6 +127,41 @@ def _existing(request, storage, category, report):
         core, found_year = _directory_identity(_name(row))
         if core in keys and found_year in {None, year}:
             related.append(row)
+    # Qualified/unrecognized names are evidence of a possible existing work,
+    # not permission to create a parallel directory or reuse that directory.
+    # Folders inside a work folder (a matched one, or any with a final year)
+    # belong to that work, and a folder naming only other years is another work.
+    related_ids = {_fid(row) for row in related}
+    by_fid = {_fid(row): row for row in directories}
+    works = {_fid(row) for row in directories
+             if _fid(row) in related_ids or _directory_identity(_name(row))[1] is not None}
+
+    def inside_work(row):
+        parent, seen = str(row.get("parent_id", "")), set()
+        while parent in by_fid and parent not in seen:
+            if parent in works:
+                return True
+            seen.add(parent)
+            parent = str(by_fid[parent].get("parent_id", ""))
+        return False
+
+    peers = [row for row in directories if _fid(row) not in related_ids and not inside_work(row)]
+    uncertain = {}
+    for title in _titles(request):
+        try:
+            reviewed = catalog.match_series_dirs(title, peers, year=year)["review"]
+        except ValueError:
+            continue  # An alias may contain characters disallowed in filenames.
+        for row in reviewed:
+            years = {int(value) for value in _YEAR.findall(_name(row))}
+            if (row.get("reasons") == ["directory_year_mismatch"] or (years and year not in years)
+                    or not _names_title(_name(row), title)):
+                continue
+            uncertain[_fid(row)] = row
+    if uncertain:
+        _needs(report, "movie_directory_identity_requires_confirmation",
+               directory_candidates=[_safe_file(row) for row in uncertain.values()])
+        return None, []
     loose = []
     for row in _list(storage, _fid(category)):
         if _directory(row) or catalog.parse_file(_name(row))["kind"] != "video":
@@ -155,10 +210,10 @@ def _select(request, storage, search, report):
         except (AuthenticationError, RiskControlError):
             raise
         except Exception as exc:
-            report["resource_checks"].append({"source": _digest(hit.get("url", "")), "status": "unavailable",
+            report["resource_checks"].append({"source": source_digest(hit.get("url", "")), "status": "unavailable",
                                                **_error(exc, "share_inventory")})
             continue
-        source_hash = _digest(hit.get("url", ""))
+        source_hash = source_digest(hit.get("url", ""))
         report["resource_checks"].append({"source": source_hash, "status": "enumerated", "file_count": len(entries)})
         try:
             reference = source_ref(hit)
@@ -277,6 +332,12 @@ def _select(request, storage, search, report):
         suffix = _subtitle_suffix(posixpath.splitext(_name(file))[0], stem)
         if suffix is None:
             continue
+        if type(file.get("size")) is not int or file["size"] <= 0:
+            # Saved files are verified by size; an unverifiable subtitle would
+            # leave the saved movie unrenamed after the write.
+            report["source_review"].append({**_safe_file(file), "reason": "source_size_must_be_positive_integer"})
+            _needs(report, "associated_subtitle_size_unverified")
+            return []
         target = posixpath.splitext(video["target_name"])[0] + suffix + parsed["extension"]
         if target.casefold() in targets:
             _needs(report, "duplicate_associated_subtitle_target")
@@ -308,6 +369,10 @@ def run(request, storage, search, journal, apply=False):
         key = "movie:" + _digest(identity)
         report["job_key"] = key
         prior = journal.get(key)
+        if prior is None:
+            legacy = legacy_scope_record(identity, storage, journal, key_prefix="movie")
+            if legacy:
+                return _needs(report, "legacy_account_scope_requires_confirmation", **legacy_scope_details(legacy[0]))
         if prior:
             previous = prior.get("configuration")
             conflicts = [field for field, value in _configuration(request).items()
@@ -347,7 +412,7 @@ def run(request, storage, search, journal, apply=False):
                       category=_safe_file(category))
         report["plan"] = [{"candidate_id": item["candidate_id"],
                            "source": {**_safe_file(item["file"]), "path": item["file"].get("path", "")},
-                           "share_source": {"source_hash": _digest(item["hit"].get("url", ""))},
+                           "share_source": {"source_hash": source_digest(item["hit"].get("url", ""))},
                            **({"source_ref": deepcopy(item["source_ref"])} if "source_ref" in item else {}),
                            "target_name": item["target_name"],
                            **({"media_info": deepcopy(item["media_info"])} if "media_info" in item else {})}
@@ -464,15 +529,18 @@ def reconcile(request, storage, journal):
     if errors:
         report.update(status="NEEDS_INPUT", reasons=errors)
         return report
-    key = "movie:" + _digest(_job_identity(request, storage))
+    identity = _job_identity(request, storage)
+    key = "movie:" + _digest(identity)
     report["job_key"] = key
     record = journal.get(key)
     if not record:
+        legacy = legacy_scope_record(identity, storage, journal, key_prefix="movie")
+        if legacy:
+            return _needs(report, "legacy_account_scope_requires_confirmation", **legacy_scope_details(legacy[0]))
         return report
     report["operations"] = record.get("operations", [])
-    if record.get("state") == "complete":
-        report["status"] = "COMPLETE"
-        return report
+    if record.get("identity") != identity:
+        return _needs(report, "record_identity_requires_confirmation")
     if record.get("state") == "ready" and not record.get("operations"):
         report.update(status="READY", reasons=["no_save_was_submitted"])
         return report
@@ -482,29 +550,56 @@ def reconcile(request, storage, journal):
             report.update(status="UNKNOWN", reasons=["directory_creation_outcome_requires_reconciliation"])
             return report
         _record_directory_verification(journal, key, record, observed, 1, "reconcile", report)
-    for operation in record.get("operations", []):
+    operations = record.get("operations", [])
+    if not isinstance(operations, list) or any(not _valid_operation(item) for item in operations):
+        return _needs(report, "operation_requires_exact_source_names_sizes_and_before_snapshot")
+    if not operations:
+        report.update(status="READY", reasons=["no_save_was_submitted"])
+        return report
+    category = _category(request, storage, report)
+    if category is None:
+        return report
+    folder, _ = _existing(request, storage, category, report)
+    if report["status"] == "NEEDS_INPUT":
+        return report
+    if folder is None or any(item["target_parent_id"] != _fid(folder) for item in operations):
+        return _needs(report, "operation_target_not_in_observed_destination_scope")
+    complete = True
+    for operation in operations:
         if operation.get("state") in {"save_pending", "unknown"} and operation.get("task_id"):
             task = storage.task_status(operation["task_id"])
+            if task.get("task_id", operation["task_id"]) != operation["task_id"]:
+                report.update(status="UNKNOWN", reasons=["save_task_status_identity_invalid"])
+                return report
             if task.get("status") == "done" and task.get("saved_fids"):
                 operation.update(saved_fids=[str(fid) for fid in task["saved_fids"]], state="saved")
                 _put(journal, key, record)
         if operation.get("state") in {"save_pending", "unknown"}:
             report.update(status="UNKNOWN", reasons=["previous_save_outcome_unknown_no_resubmission"])
             return report
-        names = {_fid(row): _name(row) for row in _list(storage, operation["target_parent_id"])}
-        targets = {item["source_fid"]: item["target_name"] for item in operation["files"]}
-        if operation.get("saved_fids") and all(fid in names for fid in operation["saved_fids"]):
-            if all(names[fid] in targets.values() for fid in operation["saved_fids"]):
-                operation["state"] = "complete"
-                continue
-            report.update(status="READY_TO_RENAME", reasons=["saved_files_verified_rename_requires_resume_apply"])
+        verified, reason = _verify_operation(storage, operation)
+        previous = operation.get("verified_files")
+        if verified is not None and previous is not None:
+            old_mapping = ({item.get("source_fid"): item.get("saved_fid") for item in previous}
+                           if isinstance(previous, list) and all(isinstance(item, dict) for item in previous)
+                           else {})
+            if (len(old_mapping) != len(operation["files"])
+                    or old_mapping != {item["source_fid"]: item["saved_fid"] for item in verified}):
+                verified, reason = None, "saved_file_source_mapping_changed"
+        if verified is None:
+            operation["state"], record["state"] = "unknown", "unknown"
+            operation["reason"] = reason
+            _put(journal, key, record)
+            report.update(status="NEEDS_INPUT" if reason == "target_filename_conflict_requires_confirmation"
+                          else "UNKNOWN", reasons=[reason])
             return report
-        report.update(status="UNKNOWN", reasons=["saved_fids_not_observed"])
-        return report
-    if not record.get("operations"):
-        report.update(status="READY", reasons=["no_save_was_submitted"])
-        return report
-    record["state"] = "complete"
+        operation["verified_files"] = verified
+        operation_complete = all(item["verified"] for item in verified)
+        operation["state"] = "complete" if operation_complete else "saved"
+        complete = complete and operation_complete
+    record["state"] = "complete" if complete else "saved"
     _put(journal, key, record)
-    report.update(status="COMPLETE", operations=record["operations"])
+    report.update(status="COMPLETE" if complete else "READY_TO_RENAME", operations=record["operations"])
+    if not complete:
+        report["reasons"] = ["saved_files_verified_rename_requires_resume_apply"]
     return report

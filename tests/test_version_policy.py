@@ -60,6 +60,17 @@ class PolicyAssessmentTests(unittest.TestCase):
         self.assertTrue(assess({'hdr': 'dolby-vision'}, {**info, 'hdr': 'Dolby Vision'}, size=100)['allowed'])
         self.assertFalse(assess({'hdr': 'require'}, {'resolution': '2160p'}, size=100)['allowed'])
 
+    def test_explicit_sdr_is_accepted_by_hdr_exclusion_without_hdr_preference(self):
+        info = {'resolution': '2160p', 'hdr': 'SDR'}
+        excluded = assess({'hdr': 'exclude'}, info, size=100)
+        self.assertTrue(excluded['allowed'])
+        self.assertEqual(excluded['hdr'], 'SDR')
+        self.assertFalse(excluded['hdr_absence_is_not_sdr_proof'])
+        self.assertFalse(assess({'hdr': 'require'}, info, size=100)['allowed'])
+        self.assertFalse(assess({'hdr': 'dolby-vision'}, info, size=100)['allowed'])
+        self.assertEqual(assess({'hdr': 'prefer'}, info, size=100)['score'],
+                         assess({'hdr': 'prefer'}, {'resolution': '2160p'}, size=100)['score'])
+
     def test_size_limits_use_known_integer_bytes_and_inclusive_decimal_units(self):
         policy, info = {'min_size_mb': 500, 'max_size_gb': 1}, {'resolution': '2160p'}
         for size in (500_000_000, 1_000_000_000):

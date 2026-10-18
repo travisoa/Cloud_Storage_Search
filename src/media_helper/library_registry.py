@@ -39,6 +39,8 @@ def drive_reference(drive_id, storage_id, *, boundary_root_id=None):
 def file_drive_reference(drive_id):
     """A drive whose Cookie lives in the project's private credential directory."""
     local_id(drive_id)
+    if drive_id == 'current':
+        raise ValueError('current 是默认网盘的保留名称')
     return {'drive_id': drive_id, 'provider': 'quark',
             'credential_source': {'type': 'file', 'name': f'drives/{drive_id}.json'},
             'account_scope': f'quark:file:{drive_id}'}
@@ -137,9 +139,10 @@ class LibraryRegistry:
             if config.get('provider') != 'quark' or source.get('type') not in {'alist', 'file'}:
                 raise ValueError('当前网盘需要 AList 夸克挂载或私有 Cookie 文件')
             if source['type'] == 'file':
+                from .storage_connection import credential_source, account_scope
                 return {'drive_id': 'current', 'provider': 'quark',
-                        'credential_source': {'type': 'file', 'name': 'quark.json'},
-                        'account_scope': 'quark:file:current',
+                        'credential_source': credential_source(config),
+                        'account_scope': account_scope(config),
                         'boundary_root_id': identifier(config['library_root_id'], '可操作根目录')}
             return drive_reference('current', source.get('storage_id'), boundary_root_id=config['library_root_id'])
         local_id(drive_id)

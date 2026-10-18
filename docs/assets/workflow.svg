@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="880" viewBox="0 0 1600 880" role="img" aria-labelledby="title desc">
+<title id="title">网盘影库助手工作流程</title><desc id="desc">三个独立证据来源形成缺集计划，按已获授权的范围执行版本选择、转存提交、文件核验和规范命名。歧义待确认，认证或风控停止，未知写入先对账。</desc>
+<rect width="1600" height="880" fill="#f6f8fc"/>
+<text x="64" y="80.72" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="44" font-weight="600" fill="#17253e">网盘影库助手工作流程</text>
+<text x="64" y="126.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">工作流示意  /  不含真实账号、分享链接或操作截图</text>
+<rect x="64" y="172" width="448" height="150" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="88" y="215.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#245bd7">01</text>
+<text x="134" y="216.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#17253e">作品身份与预计季集</text>
+<text x="88" y="264.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">TMDB / TVmaze</text>
+<text x="88" y="302.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">日程用于识别预计缺集</text>
+<polyline points="288,322 288,352 800,352" fill="none" stroke="#a5b5ce" stroke-width="2" stroke-linejoin="round"/>
+<rect x="576" y="172" width="448" height="150" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="600" y="215.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#245bd7">02</text>
+<text x="646" y="216.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#17253e">真实影库库存</text>
+<text x="600" y="264.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">目录、文件名、大小与季集</text>
+<text x="600" y="302.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">已有文件决定实际库存</text>
+<polyline points="800,322 800,352 800,352" fill="none" stroke="#a5b5ce" stroke-width="2" stroke-linejoin="round"/>
+<rect x="1088" y="172" width="448" height="150" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="1112" y="215.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#245bd7">03</text>
+<text x="1158" y="216.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#17253e">可用分享文件</text>
+<text x="1112" y="264.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">缺集触发 PanSou 搜索</text>
+<text x="1112" y="302.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#55657e">枚举真实文件后匹配候选</text>
+<polyline points="1312,322 1312,352 800,352" fill="none" stroke="#a5b5ce" stroke-width="2" stroke-linejoin="round"/>
+<polyline points="800,352 800,376" fill="none" stroke="#a5b5ce" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="800,376 793,364 807,364" fill="#a5b5ce"/>
+<rect x="444" y="382" width="712" height="76" rx="16" fill="#eaf0ff" stroke="#c9d8fa"/>
+<text x="478" y="423.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#245bd7">形成缺集计划</text>
+<text x="704" y="424.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#245bd7">仅执行已授权且无歧义的范围</text>
+<rect x="64" y="512" width="308" height="144" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="86" y="557.52" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="29" font-weight="600" fill="#17253e">版本选择</text>
+<text x="86" y="603.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">核对偏好与来源</text>
+<text x="86" y="639.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">同级版本待确认</text>
+<polyline points="386,584 434,584" fill="none" stroke="#245bd7" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="434,584 422,577 422,591" fill="#245bd7"/>
+<rect x="452" y="512" width="308" height="144" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="474" y="557.52" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="29" font-weight="600" fill="#17253e">转存提交</text>
+<text x="474" y="603.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">保存远端任务 ID</text>
+<text x="474" y="639.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">不重复提交未知结果</text>
+<polyline points="774,584 822,584" fill="none" stroke="#245bd7" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="822,584 810,577 810,591" fill="#245bd7"/>
+<rect x="840" y="512" width="308" height="144" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="862" y="557.52" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="29" font-weight="600" fill="#17253e">文件核验</text>
+<text x="862" y="603.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">核对新 fid 与大小</text>
+<text x="862" y="639.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">复查目标目录及重名</text>
+<polyline points="1162,584 1210,584" fill="none" stroke="#245bd7" stroke-width="3" stroke-linejoin="round"/>
+<polygon points="1210,584 1198,577 1198,591" fill="#245bd7"/>
+<rect x="1228" y="512" width="308" height="144" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="1250" y="557.52" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="29" font-weight="600" fill="#17253e">规范命名</text>
+<text x="1250" y="603.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">视频与字幕同步</text>
+<text x="1250" y="639.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">沿用 AList / Infuse</text>
+<polyline points="800,458 800,482 218,482 218,503" fill="none" stroke="#245bd7" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="218,503 211,491 225,491" fill="#245bd7"/>
+<rect x="64" y="706" width="1472" height="112" rx="16" fill="#edf4f7" stroke="#d8e5ed"/>
+<text x="88" y="747.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#087f70">身份、季集或版本歧义</text>
+<text x="88" y="789.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">返回待确认项</text>
+<text x="592" y="747.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#087f70">认证、验证码或风控</text>
+<text x="592" y="789.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">立即停止自动执行</text>
+<text x="1090" y="747.12" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="600" fill="#087f70">写入结果未知</text>
+<text x="1090" y="789.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">按任务 ID 与真实文件对账</text>
+<text x="64" y="861.6" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" font-weight="400" fill="#55657e">证据边界：预计日程不代表资源已发布；来源标签不代表实际码流探测。</text>
+</svg>

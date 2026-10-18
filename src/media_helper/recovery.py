@@ -117,6 +117,10 @@ def reconcile(request, storage, metadata, journal):
         report["job_key"] = key
         record = journal.get(key) if journal is not None else None
         if record is None:
+            legacy = wf.legacy_scope_record(identity, storage, journal)
+            if legacy is not None:
+                report.update(wf.legacy_scope_details(legacy[0]))
+                return _result(report, None, "NEEDS_INPUT", "legacy_account_scope_requires_confirmation")
             return _result(report, record, "NO_RECORD", "no_durable_execution_record")
         if not isinstance(record, dict) or record.get("identity") != identity:
             return _result(report, None, "NEEDS_INPUT", "record_identity_requires_confirmation")

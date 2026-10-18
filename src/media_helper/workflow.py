@@ -21,7 +21,7 @@ from . import catalog
 from .naming import episode_filename, media_info, quality_score, series_prefix
 from .planner import _subtitle_suffix
 from .providers import AuthenticationError, RiskControlError
-from .sources import safe_source, source_ref
+from .sources import safe_source, source_digest, source_ref
 
 
 _TV_CATEGORY_NAMES = {"电视剧", "剧集", "電視劇", "劇集", "tv", "tvshows", "tvseries"}
@@ -131,6 +131,13 @@ def _request_errors(request):
         errors.append("source_selection_must_be_an_episode_mapping")
     if type(request.get("include_media_tags", True)) is not bool:
         errors.append("include_media_tags_must_be_boolean")
+    replace = request.get("replace_episodes", [])
+    if (not isinstance(replace, list) or len(set(replace)) != len(replace) or any(
+            not isinstance(key, str) or not re.fullmatch(r"S(\d{2})E\d{2,3}", key)
+            or not str(request.get("season")).isdigit() or int(key[1:3]) != int(request["season"]) for key in replace)):
+        errors.append("replace_episodes_must_be_unique_keys_of_the_requested_season")
+    if type(request.get("remove_replaced", False)) is not bool or (request.get("remove_replaced") and not replace):
+        errors.append("remove_replaced_requires_replace_episodes")
     mapping = request.get("source_episode_mapping", {})
     if not isinstance(mapping, dict):
         errors.append("source_episode_mapping_must_be_a_candidate_mapping")
@@ -162,6 +169,30 @@ def _job_identity(request, storage):
             "metadata_source": str(request["metadata_source"]).strip().casefold(),
             "series_id": identifier, "season": int(request["season"]),
             "library_root_id": root}
+
+
+def legacy_scope_record(identity, storage, journal, *, key_prefix="season"):
+    """Find a root-scoped predecessor without adopting it for another account.
+
+    Call only when the current account's key has no record. An old scope does
+    not establish which account submitted its writes, including completed ones.
+    """
+    if journal is None:
+        return None
+    for scope in getattr(storage, "legacy_account_scopes", ()):
+        if not isinstance(scope, str) or scope == identity.get("account_scope"):
+            continue
+        old_identity = dict(identity, account_scope=scope)
+        old_key = key_prefix + ":" + _digest(old_identity)
+        old_record = journal.get(old_key)
+        if old_record is not None:
+            return old_key, old_record
+    return None
+
+
+def legacy_scope_details(key):
+    """Point a blocked caller at the read-only account check for that record."""
+    return {"legacy_job_key": key, "next_step": "python3 scripts/media.py adopt-scope " + key}
 
 
 def _execution_config(request):
@@ -459,6 +490,22 @@ def _share_tree(storage, hit, max_entries=5000):
     if not url:
         return []
     parent, path = str(hit.get("parent_id", "0")), str(hit.get("path", ""))
+    share_ref = None
+    listings = {}
+
+    def listing_for(folder):
+        nonlocal share_ref
+        if folder in listings:
+            return listings[folder]
+        continuation = getattr(storage, "share_directory", None)
+        if share_ref is not None and callable(continuation):
+            listing = continuation(share_ref, folder)
+        else:
+            listing = storage.share_files(url, password=hit.get("password"), parent_id=folder)
+        share_ref = listing["share_ref"]
+        listings[folder] = listing
+        return listing
+
     # A remembered directory path also supplies media labels (for example 4K).
     # Re-read its real ancestry before using those labels: a share owner can
     # rename or replace a directory while retaining the selected parent fid.
@@ -469,7 +516,7 @@ def _share_tree(storage, hit, max_entries=5000):
             raise ValueError("preferred_share_directory_path_requires_reconfirmation")
         observed, ancestors = "0", {"0"}
         for part in parts:
-            listing = storage.share_files(url, password=hit.get("password"), parent_id=observed)
+            listing = listing_for(observed)
             matches = [item for item in listing["files"]
                        if _directory(item) and _name(item) == part]
             if len(matches) != 1 or not _fid(matches[0]) or _fid(matches[0]) in ancestors:
@@ -484,7 +531,7 @@ def _share_tree(storage, hit, max_entries=5000):
         if parent in seen:
             raise ValueError("share_directory_cycle")
         seen.add(parent)
-        listing = storage.share_files(url, password=hit.get("password"), parent_id=parent)
+        listing = listing_for(parent)
         share_ref = listing["share_ref"]
         for file in listing["files"]:
             item = dict(file)
@@ -523,10 +570,10 @@ def _select(request, storage, search, missing, report):
         except (AuthenticationError, RiskControlError):
             raise
         except Exception as exc:
-            report["resource_checks"].append({"source": _digest(hit.get("url", "")),
+            report["resource_checks"].append({"source": source_digest(hit.get("url", "")),
                                                "status": "unavailable", **_error(exc, "share_inventory")})
             continue
-        report["resource_checks"].append({"source": _digest(hit.get("url", "")),
+        report["resource_checks"].append({"source": source_digest(hit.get("url", "")),
                                            "status": "enumerated", "file_count": len(entries)})
         try:
             reference = source_ref(hit)
@@ -538,7 +585,7 @@ def _select(request, storage, search, missing, report):
         for entry in entries:
             file = entry["file"]
             parsed = catalog.parse_file(_name(file), season=int(request["season"]))
-            source_key = (_digest(hit.get("url", "")), _fid(file))
+            source_key = (source_digest(hit.get("url", "")), _fid(file))
             if source_key in seen:
                 continue
             seen.add(source_key)
@@ -614,8 +661,12 @@ def _select(request, storage, search, missing, report):
                 continue
             if decision is not None and not decision['allowed']:
                 continue
-            if parsed["ambiguous"] or file.get("size") == 0:
-                source_review.append({**_safe_file(file), "reasons": parsed["reasons"]})
+            valid_size = type(file.get("size")) is int and file["size"] > 0
+            if parsed["ambiguous"] or not valid_size:
+                reasons = list(parsed["reasons"])
+                if not valid_size:
+                    reasons.append("source_size_must_be_positive_integer")
+                source_review.append({**_safe_file(file), "reasons": reasons})
                 continue
             key = parsed.get("episode_key")
             if key in needed:
@@ -665,6 +716,10 @@ def _select(request, storage, search, missing, report):
             suffix = _subtitle_suffix(posixpath.splitext(_name(file))[0], stem)
             if suffix is None:
                 continue
+            if type(file.get("size")) is not int or file["size"] <= 0:
+                source_review.append({**_safe_file(file), "reasons": ["source_size_must_be_positive_integer"]})
+                alternatives[key] = [{"reason": "associated_subtitle_size_unverified"}]
+                continue
             target = posixpath.splitext(video["target_name"])[0] + suffix + parsed["extension"]
             if target.casefold() in subtitle_targets:
                 alternatives[key] = [{"reason": "duplicate_associated_subtitle_target"}]
@@ -673,7 +728,7 @@ def _select(request, storage, search, missing, report):
             subtitle_sources.add(_fid(file))
             selected.append(dict(subtitle, episode_key=key, target_name=target,
                                  **({"source_ref": deepcopy(video["source_ref"])} if "source_ref" in video else {}),
-                                 candidate_id=_digest((_digest(subtitle["hit"].get("url", "")), _fid(file)))))
+                                 candidate_id=_digest((source_digest(subtitle["hit"].get("url", "")), _fid(file)))))
     if alternatives:
         report["unresolved_episodes"] = alternatives
         if source_review:
@@ -740,13 +795,15 @@ def _verify_saved(storage, operation):
     if set(ids) & set(operation["before_fids"]):
         return None
     selected = operation["files"]
+    if any(type(item.get("size")) is not int or item["size"] <= 0 for item in selected):
+        return None
     verified = []
     for fid in ids:
         actual = current.get(str(fid))
         if not actual or _directory(actual):
             return None
         matches = [item for item in selected if _name(actual) in {item["name"], item["target_name"]}
-                   and (item.get("size") is None or actual.get("size") == item["size"])]
+                   and type(actual.get("size")) is int and actual["size"] == item["size"]]
         if len(matches) != 1:
             return None
         verified.append(dict(matches[0], saved_fid=str(fid)))
@@ -849,6 +906,91 @@ def _resume(storage, journal, key, record, report):
     return None
 
 
+def _verified_replacements(record):
+    """Episodes of a replacement record whose new video was saved, renamed and read back."""
+    return {item["episode_key"]: item for operation in record.get("operations", [])
+            for item in operation.get("verified_files", []) if item.get("verified")
+            and item.get("episode_key") in record.get("replacements", {})
+            and catalog.parse_file(item["target_name"])["kind"] == "video"}
+
+
+def _replacement_report(record):
+    return [{"episode_key": episode, **deepcopy(entry)}
+            for episode, entry in sorted(record["replacements"].items())]
+
+
+def _recycle_replaced(storage, journal, key, record, report):
+    """Move explicitly replaced old files to the recycle bin after the new ones are verified."""
+    verified = _verified_replacements(record)
+    try:
+        _recycle_entries(storage, journal, key, record, report, verified)
+    finally:
+        report["replacements"] = _replacement_report(record)
+    if any(entry["state"] != "recycled" for entry in record["replacements"].values()):
+        report["status"] = "PARTIAL"
+
+
+def _recycle_entries(storage, journal, key, record, report, verified):
+    for episode, entry in sorted(record["replacements"].items()):
+        old, new = entry["old"], verified.get(episode)
+        if entry["state"] == "recycled":
+            continue
+        try:
+            listing = _list(storage, old["parent_id"])
+        except (AuthenticationError, RiskControlError):
+            raise
+        except Exception as exc:
+            entry.setdefault("observation_error", _error(exc, "recycle_check"))
+            report.setdefault("reasons", []).append("old_version_listing_unavailable")
+            continue
+        current = {_fid(row): row for row in listing}
+        if entry["state"] in {"recycle_pending", "unknown"}:
+            # A request was already sent: only observe, never send it again.
+            entry["state"] = "recycled" if old["fid"] not in current else "unknown"
+            if entry["state"] == "unknown":
+                entry["reason"] = "old_version_still_listed_requires_manual_check"
+            _put(journal, key, record)
+            continue
+        if (new is None or new.get("saved_fid") not in current
+                or _name(current[new["saved_fid"]]) != new["target_name"]):
+            entry.update(state="kept", reason="new_version_not_verified")
+            continue
+        own = current.get(old["fid"])
+        if own is None or _name(own) != old["name"] or own.get("size") != old["size"]:
+            entry.update(state="kept", reason="old_file_changed_or_missing")
+            continue
+        entry["state"] = "recycle_pending"
+        _put(journal, key, record)
+        try:
+            report["writes_attempted"] = True
+            storage.trash(old["fid"])
+        except Exception as exc:
+            entry.update(state="unknown", **_error(exc, "trash"))
+            _put(journal, key, record)
+            report.setdefault("reasons", []).append("old_version_recycle_outcome_unknown")
+            if isinstance(exc, (AuthenticationError, RiskControlError)):
+                # Stop every further write; later runs only observe this fid.
+                raise
+            continue
+        for attempt in range(3):
+            try:
+                gone = old["fid"] not in {_fid(row) for row in _list(storage, old["parent_id"])}
+            except (AuthenticationError, RiskControlError):
+                raise
+            except Exception:
+                gone = False
+            if gone:
+                entry["state"] = "recycled"
+                break
+            if attempt < 2:
+                time.sleep(0.3)
+        else:
+            entry["state"] = "unknown"
+            report.setdefault("reasons", []).append("old_version_recycle_not_yet_observed")
+        report["writes_performed"] = True
+        _put(journal, key, record)
+
+
 def run(request, storage, metadata, search, journal, apply=False, *, resume_only=False):
     """Reconcile an explicitly identified season, optionally saving missing files.
 
@@ -878,6 +1020,10 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         key = "season:" + _digest(identity)
         report["job_key"] = key
         prior = journal.get(key)
+        if prior is None:
+            legacy = legacy_scope_record(identity, storage, journal)
+            if legacy is not None:
+                return _needs(report, "legacy_account_scope_requires_confirmation", **legacy_scope_details(legacy[0]))
         if prior:
             conflicts = _configuration_conflicts(request, prior)
             if conflicts:
@@ -890,6 +1036,27 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
             resumed = _resume(storage, journal, key, prior, report)
             if resumed is not None:
                 return resumed
+        replacing = set(request.get("replace_episodes", []))
+        done = (_verified_replacements(prior) if prior and prior.get("state") == "complete"
+                and prior.get("replacements") and set(prior["replacements"]) == replacing else {})
+        if done:
+            # The same replacement already saved new versions: never treat them
+            # as old ones. Only finish its authorized clean-up. A record that
+            # stopped before any save has nothing to protect and is planned anew.
+            report.update(status="COMPLETE", operations=prior.get("operations", []))
+            report["replacements"] = _replacement_report(prior)
+            cleanup = any(prior["replacements"][episode]["state"] != "recycled" for episode in done)
+            if apply and request.get("remove_replaced") and cleanup:
+                report["reasons"].append("completing_recorded_replacement_cleanup")
+                _recycle_replaced(storage, journal, key, prior, report)
+            else:
+                report["reasons"].append("replacement_already_completed")
+            unfinished = sorted(replacing - set(done))
+            if unfinished:
+                # Saving stopped before these episodes; name them in a new request.
+                _needs(report, "replacement_partially_completed_rerun_pending_episodes",
+                       completed_episodes=sorted(done), pending_episodes=unfinished)
+            return report
         if resume_only:
             # A subscription recovery may finish durable submitted operations,
             # but new missing episodes must pass its source policy separately.
@@ -909,6 +1076,20 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         inventory = catalog.build_episode_inventory([file for file in existing_files if not _directory(file)], season=int(request["season"]))
         if inventory["review"]:
             return _needs(report, "existing_library_episode_numbering_ambiguous", inventory_review=inventory["review"])
+        replaced = {}
+        for episode in request.get("replace_episodes", []):
+            rows = inventory["existing"].get(episode, [])
+            if (len(rows) != 1 or not destination
+                    or str(rows[0].get("parent_id", "")) != str(destination)):
+                return _needs(report, "replace_episode_requires_one_existing_file_in_destination",
+                              replace_episode=episode, existing_files=[_safe_file(row) for row in rows])
+            replaced[episode] = _safe_file(rows[0])
+            # The old version is treated as absent only for this explicit
+            # replacement; it is neither renamed nor counted as present.
+            del inventory["existing"][episode]
+        if replaced:
+            report["replacements"] = [{"episode_key": episode, "old": value}
+                                      for episode, value in sorted(replaced.items())]
         episodes = metadata.get_season(request["series_id"], int(request["season"]))
         if isinstance(episodes, dict):
             episodes = episodes.get("episodes", [])
@@ -918,6 +1099,13 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         difference = catalog.calculate_missing(episodes, inventory, as_of=as_of)
         report.update(existing=difference["existing"], missing=difference["missing"], future=difference["future"],
                       unknown_schedule=difference["unknown"], metadata_basis=difference.get("basis", "expected_schedule_only"))
+        if replaced:
+            # A replacement request covers only the named episodes; other gaps
+            # are reported and left for an ordinary request.
+            def episode_key(row):
+                return row.get("episode_key") or f'S{int(row["season"]):02d}E{int(row["episode"]):02d}'
+            report["missing_not_in_scope"] = [row for row in report["missing"] if episode_key(row) not in replaced]
+            report["missing"] = [row for row in report["missing"] if episode_key(row) in replaced]
         if not report["missing"]:
             report["status"] = ("COMPLETE" if report["operations"] else "UP_TO_DATE") if not report["unknown_schedule"] else "NEEDS_INPUT"
             if report["unknown_schedule"]:
@@ -926,13 +1114,18 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         selected = _select(request, storage, search, report["missing"], report)
         if report["status"] == "NEEDS_INPUT":
             return report
+        unlabelled = sorted({item["episode_key"] for item in selected if item["episode_key"] in replaced
+                             and not (item.get("media_info") or {}).get("resolution")
+                             and catalog.parse_file(_name(item["file"]))["kind"] == "video"})
+        if unlabelled:
+            return _needs(report, "replacement_requires_resolution_label", replace_episodes=unlabelled)
         if _collision(_list(storage, destination) if destination else [], selected):
             return _needs(report, "source_or_target_filename_conflict")
         report["directories"] = directories
         report["target_folder_id"] = destination
         report["plan"] = [{"episode_key": item["episode_key"], "candidate_id": item["candidate_id"],
                            "source": {**_safe_file(item["file"]), "path": item["file"].get("path", "")},
-                           "share_source": {"source_hash": _digest(item["hit"].get("url", ""))},
+                           "share_source": {"source_hash": source_digest(item["hit"].get("url", ""))},
                            **({"source_ref": deepcopy(item["source_ref"])} if "source_ref" in item else {}),
                            "target_name": item["target_name"],
                            **({"media_info": deepcopy(item["media_info"])} if "media_info" in item else {})}
@@ -942,6 +1135,8 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         record = {"schema_version": 2, "state": "ready", "operations": [], "plan": report["plan"],
                   "identity": identity, "configuration": _execution_config(request),
                   "target_folder_id": destination}
+        if replaced:
+            record["replacements"] = {key: {"old": value, "state": "kept"} for key, value in replaced.items()}
         if prior and prior.get("directory_verifications"):
             record["directory_verifications"] = deepcopy(prior["directory_verifications"])
         _put(journal, key, record)
@@ -990,7 +1185,10 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
                 _put(journal, key, record)
                 return _needs(report, "source_or_target_filename_conflict_before_save", operations=record["operations"])
             current_inventory = catalog.build_episode_inventory(before, season=int(request["season"]))
-            if set(current_inventory["existing"]) & {item["episode_key"] for item in items}:
+            appeared = {episode for episode in set(current_inventory["existing"]) & {item["episode_key"] for item in items}
+                        if not (episode in replaced and [_fid(row) for row in current_inventory["existing"][episode]]
+                                == [replaced[episode]["fid"]])}
+            if appeared:
                 record["state"] = "complete"
                 _put(journal, key, record)
                 return _needs(report, "episode_appeared_before_save", operations=record["operations"])
@@ -1041,6 +1239,8 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         record["state"] = "complete"
         _put(journal, key, record)
         report.update(status="COMPLETE", operations=record["operations"])
+        if replaced and request.get("remove_replaced"):
+            _recycle_replaced(storage, journal, key, record, report)
         return report
     except Exception as exc:
         # Only the provider exception class and step are exposed, never raw HTTP.

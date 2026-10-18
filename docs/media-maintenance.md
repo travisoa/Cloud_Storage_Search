@@ -1,6 +1,6 @@
-# 精确匹配、体检、版本策略、压缩包与原地整理
+# 影库维护
 
-这些功能通过 `scripts/media.py` 在后台使用。匹配、策略设置、体检、压缩包检查及各类 `--plan` 预览不写云盘；转存、解压、入库和改名都要求对应命令带 `--apply`。
+入口为 `scripts/media.py`。匹配、策略设置、体检、压缩包检查及 `--plan` 预览不写云盘；维护命令的转存、解压、入库和改名须在已授权范围内使用 `--apply`。通用执行与恢复约定见[执行约定](headless-design.md)。
 
 ## TMDB 精确匹配
 
@@ -10,9 +10,9 @@ python3 scripts/media.py match --kind movie --tmdb-id https://www.themoviedb.org
 python3 scripts/media.py match --task-id TASK_ID --tmdb-id https://www.themoviedb.org/tv/作品ID --bind
 ```
 
-可按 TMDB 数字 ID、同类作品的 HTTPS 详情链接，或 `--imdb-id` / `--tvdb-id` 查找。标题搜索须提供年份；先取完整的有界搜索结果，再核同一 ID 的原名、别名、译名和外部 ID，不按第一条或模糊相似度自动确认。多部同名、年份冲突、外部 ID 矛盾或结果未完整取得时返回待处理状态。
+支持 TMDB 数字 ID、同类作品的 HTTPS 详情链接及 `--imdb-id` / `--tvdb-id`。标题搜索须提供年份；完整获取有界搜索结果后，核验同一 ID 的原名、别名、译名和外部 ID，搜索排序与模糊相似度不作为确认依据。同名候选、年份或外部 ID 冲突、结果不完整均返回待处理状态。
 
-`--task-id` 额外核验已确认任务的身份。`--bind` 只保存通过实时交叉核验的 TMDB 关联，不改变 TVmaze 等原主身份、任务或订阅 ID。追更使用该关联补充预计日程，仍须检查两源公共 ID 及季集冲突。结果保存在 `runtime/reports/match-latest.json`。TMDB 凭据继续通过 `configure-tmdb` 隐藏输入，不放在命令或聊天中。
+`--task-id` 同时核验已确认任务的身份。`--bind` 仅保存通过实时交叉核验的 TMDB 关联，保留原主身份、任务及订阅 ID。追更使用关联补充预计日程，仍须核对两源公共 ID 与季集冲突，详见[元数据来源](metadata-assessment.md)。结果保存在 `runtime/reports/match-latest.json`，凭据通过[配置命令](credentials.md#配置命令)录入。
 
 ## 影库体检
 
@@ -22,15 +22,15 @@ python3 scripts/media.py health --folder-id FOLDER_ID --metadata
 python3 scripts/media.py health --library-id LIBRARY_ID
 ```
 
-默认扫描当前影库的目录、文件名、大小及季集，检查目录和文件前缀、无法识别的编号、多版本同集、孤立字幕、空目录、零字节、压缩分卷缺号等。年份或名称告警是规范化线索，不能单凭告警断言文件损坏或 Infuse 无法识别。数字片名不会被当作发行年份。
+默认扫描所选影库的目录、文件名、大小及季集，检查前缀差异、未知编号、同集多版本、孤立字幕、空目录、零字节和压缩分卷缺号等。年份或名称告警仅表示规范化问题，不证明文件损坏或 Infuse 识别失败；数字片名不视为发行年份。
 
-`--metadata` 可进一步使用已配置元数据核对唯一作品和预计季集；元数据不可用或身份不唯一会保留未完成状态。预计缺集、未来日程与真实库存分别记录，不表示资源已发布。未执行媒体下载、码流完整性或 Infuse 播放验证。
+`--metadata` 使用已配置元数据核对唯一作品和预计季集；元数据不可用或身份不唯一时保留未完成状态。预计缺集、未来日程与真实库存分别记录，不代表资源已发布。体检仅读取目录属性与可选元数据，不检查媒体字节完整性或 Infuse 播放。
 
-读取限额默认 10,000 个条目、12 层，扫描不完整不会报告健康。检查子目录也先证明其位于影库内，隔离测试影库自动排除。终端最多展示20条问题，`--details` 可查看完整输出；完整 JSON 和 Markdown 始终写入 `runtime/reports/health-latest.json`、`runtime/reports/health-latest.md`，不自动修复旧文件。
+默认读取上限为 10,000 个条目、12 层；扫描不完整时不报告健康。子目录检查须先核验影库归属，隔离测试影库自动排除。终端默认最多展示 20 条问题，`--details` 显示完整结果；JSON 和 Markdown 报告分别保存至 `runtime/reports/health-latest.json`、`runtime/reports/health-latest.md`。体检不自动修复文件。
 
 ## 按剧设置版本策略
 
-影库整体的三档预设见[建库与导入说明](library-bootstrap.md#版本预设)；这里的单剧规则优先于预设。`--prefer-size smaller|larger` 可在同档版本之间按体积取舍。
+影库预设见[版本预设](library-bootstrap.md#版本预设)，作品级策略优先于影库预设。`--prefer-size smaller|larger` 在同分辨率版本之间按体积排序。
 
 ```bash
 python3 scripts/media.py policy show --task-id TASK_ID
@@ -39,11 +39,11 @@ python3 scripts/media.py policy set --task-id TASK_ID --resolution 2160p --resol
 python3 scripts/media.py policy reset --task-id TASK_ID
 ```
 
-也可用 `--profile-key` 选择已确认的作品；新影库任务需同时指定 `--library-id`。策略按稳定作品 ID 和年份隔离，后续请求、任务恢复和追更每次读取最新设置。重置后回到原已确认的画质偏好，不从旧快照恢复已删除的策略。
+`--profile-key` 可指定已确认作品，新影库任务须同时指定 `--library-id`。策略按稳定作品 ID 和年份隔离，后续请求、任务恢复及追更均读取最新设置。重置后恢复原已确认画质偏好，不从旧快照恢复已删除策略。
 
-分辨率按重复 `--resolution` 的顺序选择；只有 `--allow-fallback` 才允许其他已列分辨率。编码可偏好或用 `--require-codec` 限定；HDR 可选 `any / prefer / exclude / require / dolby-vision`，还可用发布组关键字和文件大小约束。选择先比较分辨率；同分辨率追更优先原已选来源，再比较次要偏好，等价结果保留待确认。
+分辨率按重复 `--resolution` 的顺序选择，仅 `--allow-fallback` 允许回退至其他已列分辨率。编码可设为偏好或由 `--require-codec` 限定；HDR 支持 `any / prefer / exclude / require / dolby-vision`，并可附加发布组关键词及文件大小约束。先比较分辨率；追更在同分辨率下优先已选来源，再比较次要偏好，等价结果保持待确认。
 
-所有媒体信息都保留文件名或父目录的标签依据，未探测真实码流。缺少 HDR 标签不证明 SDR，要求特定编码或 HDR 而没有依据时不通过。设置只影响待补集，不替换、删除或升级已存文件，也不扩大自动追更的作品、季和数字编号授权。
+策略使用[有来源依据的媒体标签](headless-design.md#命名与媒体信息)，缺失标签不满足特定编码或 HDR 要求。策略仅影响待补资源，不替换、删除或升级已存文件，不扩大追更的作品、季或数字集号授权；已有剧集替换须使用下述专用参数。
 
 ## 压缩包检查与隔离解压
 
@@ -54,17 +54,30 @@ python3 scripts/media.py archive extract --fid ARCHIVE_FID --parent-id SOURCE_PA
 python3 scripts/media.py archive extract --fid ARCHIVE_FID --parent-id SOURCE_PARENT --reconcile
 ```
 
-搜索优先直接视频。遇到压缩包会记录候选、格式及分卷线索；策略 `skip` 跳过，`manual` 保留显式选择提示。两者均不自动转存分享中的压缩包或解压，不能用包名推断包内季集及画质。
+搜索优先选择直接视频。压缩包仅记录候选、格式及分卷线索；`skip` 跳过，`manual` 保留显式选择提示，两者均不自动转存或解压分享中的压缩包。包名不作为包内季集与画质的证据。
 
-对影库内已经存在且明确选中的单包，可预览后在一次独立请求中执行夸克云解压。提交前核对源 fid、名称、大小和真实目录范围，只写入本次创建的空目录 `解压待整理_…`。保留原包，记录任务 ID，递归核验输出都属于该目录且不是影库旧 fid。完成仅表示待整理输出已核验，之后仍通过扫描、身份匹配和导入计划决定入库。
+对影库内明确选定且已获解压授权的单包，提交前核对源 fid、名称、大小及目录范围，仅写入该任务新建的空目录 `解压待整理_…`。保留原包并记录任务 ID，递归核验输出均位于该目录且不属于影库既有 fid。解压完成仅表示输出核验通过，入库仍按扫描、身份匹配和导入计划执行。
 
-分卷（含 ZIP + Z01）、缺卷、加密/密码、未知格式或会员要求保留明确待处理原因；当前不自动输入密码、下载本地解压或猜测分卷完整性。认证和风控立即停止。无任务 ID 的未知提交不重发；已有任务 ID 时 `--reconcile` 只查询状态和真实输出。更改目录或切换嵌套影库不能绕过这条保护。隔离测试影库仅允许检查和预览。
+分卷（含 ZIP + Z01）、缺卷、加密或密码、未知格式及会员要求保留具体待处理原因，不自动输入密码、本地解压或推断分卷完整性。认证和风控按[执行范围](headless-design.md#执行范围)处理。无任务 ID 的未知提交不重发；有任务 ID 时通过 `--reconcile` 查询状态与实际输出，不因更换目录或嵌套影库重复提交。隔离测试影库仅允许检查和预览。
 
-运行记录在私有 `runtime/archive-jobs.sqlite3`，最新结果为 `runtime/reports/archive-latest.json`。当前云解压端点及恢复路径通过模拟服务验证，尚未执行真实压缩包解压；实际可用格式、账号权益与服务端行为仍需对用户选定包验收。
+执行记录保存在私有 `runtime/archive-jobs.sqlite3`，最新报告为 `runtime/reports/archive-latest.json`。模拟验证与真实操作验收范围见[验证报告](test-report.md)；实际可用格式及账号权益以所选源包的服务端结果为依据。
+
+## 替换已有剧集的版本
+
+```bash
+python3 scripts/media.py sync --title 剧名 --year 2026 --season 1 --series-id ID --metadata-source tvmaze \
+  --replace-episode S01E02 --replace-episode S01E03 --plan
+python3 scripts/media.py sync --title 剧名 --year 2026 --season 1 --series-id ID --metadata-source tvmaze \
+  --replace-episode S01E02 --replace-episode S01E03 --remove-replaced --apply
+```
+
+普通请求仅补缺集；`--replace-episode` 为指定的已有剧集重新选源。每集在目标季目录中须恰有一个旧文件，新版本须有分辨率标签，选择遵循作品级策略或影库预设，不与旧文件比较画质。替换任务仅处理指定剧集，其他缺集列入 `missing_not_in_scope`。新文件使用[统一命名规则](headless-design.md#命名与媒体信息)，旧文件默认保留。
+
+显式授权 `--remove-replaced` 后，仅在新版本转存、改名及读回核验完成时，将记录中的旧 fid 移入夸克回收站，不清空回收站。回收时遇到认证或风控立即停止全部写入；回收结果未知时仅核对真实目录，不重发请求。重复执行同一请求仅恢复未完成回收，不重新替换已转存并核验的新版本；转存前中止、未保存任何新版本的请求会重新规划。部分剧集未保存时返回 `replacement_partially_completed_rerun_pending_episodes` 及待处理剧集，需另行只指定这些剧集。
 
 ## 从搜索结果转存压缩包并入库
 
-搜索只找到压缩包时，任务报告的 `archive_candidates` 列出候选 ID。用户选定后：
+搜索仅返回压缩包时，`archive_candidates` 列出候选 ID。选定候选后使用：
 
 ```bash
 python3 scripts/media.py archive fetch TASK_ID --candidate-id 候选ID --plan
@@ -74,9 +87,9 @@ python3 scripts/media.py archive organize PLAN_ID --plan
 python3 scripts/media.py archive organize PLAN_ID --apply
 ```
 
-`fetch` 只接受单文件、受支持格式的候选，且分享须无提取码（带密码的分享不进入任务快照）。执行前重新枚举分享并核对 fid、名称和大小，在影库根目录下新建空的 `压缩包待解压_…`，单次提交转存；任务 ID 先落盘，结果未知时 `--reconcile` 只按任务 ID 和真实文件对账，不重发。`--extract` 在核验转存后接着执行上节的隔离解压。
+`fetch` 仅接受单文件、受支持格式且分享无提取码的候选；带密码的分享不进入任务快照。执行前重新枚举分享并核对 fid、名称及大小，在影库根目录下新建空目录 `压缩包待解压_…`，单次提交转存并持久化任务 ID。结果未知时通过 `--reconcile` 按任务 ID 与实际文件对账，不重复提交。`--extract` 在转存核验通过后执行隔离解压。
 
-`archive plan` 只读取已核验完成（EXTRACTED）的解压输出，按“可选扫描与整理”的同一规则识别电影/电视剧身份并生成计划；`organize` 执行该计划，把视频和关联字幕移动并命名进电影或电视剧分类。原压缩包、暂存目录和未识别文件保留原位，不删除。
+`archive plan` 仅读取已核验完成（`EXTRACTED`）的解压输出，按[可选扫描与整理](library-bootstrap.md#可选扫描与整理)识别身份并生成计划。`organize` 执行已授权计划，将视频和关联字幕移动至对应分类并命名；原压缩包、暂存目录及未识别文件保留原位。
 
 ## 单个作品目录原地规范命名
 
@@ -86,6 +99,6 @@ python3 scripts/media.py tidy apply PLAN_ID          # 只读复核
 python3 scripts/media.py tidy apply PLAN_ID --apply  # 用户授权后执行
 ```
 
-用于体检报告中的“文件与目录前缀差异”。前缀取真实作品目录名，不改目录名；电视剧按文件名季集号（季目录号仅作补充，冲突则保留），电影要求目录顶层只有一个正片。字幕仅在同目录唯一关联视频时跟随改名。无法识别的编号、同集多版本、目标重名、花絮及季目录以外的视频都保留原样并列入待处理。分类目录、地区子分类或含多个带年份作品的目录会被拒绝。
+用于处理体检报告中的文件与目录前缀差异，按[统一命名规则](headless-design.md#命名与媒体信息)生成计划，不改作品目录名。电视剧使用文件名季集号，季目录仅补充缺失信息，冲突保留待处理；电影要求作品目录顶层仅有一个正片。字幕仅在同目录唯一关联视频时同步命名。未知编号、同集多版本、目标重名、花絮及季目录外视频均保留原位并列入待处理；分类目录、地区子分类及包含多个带年份作品的目录不接受整理。
 
-执行时先重核目录链、文件 fid、名称、大小与目标重名，每次改名前写意图，改名后读回核验。结果未知时下一次运行只读观察：已是新名记为完成，仍是原名记为未生效，之后的 `--apply` 才会继续。计划保存在私有 `runtime/tidy-plans/`。目录缺少年份等需要元数据的问题不在此命令范围内。
+执行时复核目录链、文件 fid、名称、大小及重名冲突；每次改名前持久化意图，改名后读回核验。结果未知时，下一次运行仅对账：已为目标名则记录完成，仍为原名则记录未生效，后续 `--apply` 才继续执行。计划保存在私有 `runtime/tidy-plans/`。目录缺少年份等元数据问题不在此命令范围内。

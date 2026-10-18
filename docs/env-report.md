@@ -1,19 +1,14 @@
-# 当前本机接入
+# 环境核查入口
 
-核查日期：2026-10-17（Asia/Shanghai）。
+环境配置见[密钥存储与配置](credentials.md)，真实执行验收见[验证报告](test-report.md)。静态文档不作为服务、凭据或订阅当前状态的依据。
 
-| 项目 | 当前结果 |
-| --- | --- |
-| 本机 | macOS ARM64，Apple Container 1.5.0 |
-| 原 AList | v3.63.0，容器 alist；未修改或重启 |
-| 夸克凭据 | 复用已启用的 AList storage 1，驱动 Quark，挂载 /Quark |
-| 凭据读取 | 数据库与WAL稳定快照仅在内存校验；不输出Cookie、不另存凭据 |
-| 影库 | 用户指定根ID可读，有5个根条目；已有电视剧、电影、纪录片和综艺分类已核实 |
-| 搜索 | media-pansou 后台API运行，固定ARM64镜像，绑定127.0.0.1:8888 |
-| 旧网页 | media-qasx 保持停止；本项目已移除其代码，`manage.py` 不再管理它 |
-| 元数据 | TVmaze公开接口已读取；TMDB接口实现但本机尚未配置key |
-| Infuse | 沿用用户原有AList连接；未做播放测试 |
+```bash
+python3 scripts/manage.py status
+python3 scripts/media.py doctor
+python3 scripts/media.py doctor --check-quark
+python3 scripts/media.py watch list
+```
 
-配置只保存挂载ID、影库和分类目录ID；运行与凭据引用代码不复制原AList数据到磁盘。实际账号/空间和风控状态可能变化，每次执行重新核对；失败不会自动重登或打开网页。
+以上命令用于服务状态、配置、影库可读性及订阅状态检查，不写云盘。
 
-没有安装新的登录自启动、定时追更或通知。重启后运行 `python3 scripts/manage.py up` 启动本项目搜索；执行任务用 `scripts/media.py`。旧网页验证历史保存在 archive/，不作为当前后台验收。
+[初期本机接入记录](archive/2026-10-17-initial-environment.md)保留早期核查结果，仅用于历史追溯。

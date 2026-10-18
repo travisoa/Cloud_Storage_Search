@@ -131,7 +131,7 @@ class WatchingPolicyCycleTests(unittest.TestCase):
         report = self.cycle({'allow_fallback': True})
         self.assertEqual(report['status'], 'COMPLETE', report)
         self.assertEqual(self.storage.saved, [['lower']])
-        self.assertEqual(self.storage.renamed, [('new-lower', '测试剧 (2026) S01E02 [1080p].mkv')])
+        self.assertEqual(self.storage.renamed, [('new-lower', '测试剧 (2026)S01E02_1080P.mkv')])
         self.assertEqual(report['missing'], [])
 
     def test_live_cycle_waits_for_allowed_version_without_writing(self):

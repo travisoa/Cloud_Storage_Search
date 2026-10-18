@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1060" viewBox="0 0 1600 1060" role="img" aria-labelledby="title desc">
+<title id="title">来源标签与命名示例</title><desc id="desc">示例展示文件名标签优先、目录标签补充、缺失字段省略和无标签命名。全部作品与文件为虚构示意，未执行视频探测或云盘改名。</desc>
+<rect width="1600" height="1060" fill="#f6f8fc"/>
+<text x="64" y="80.72" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="44" font-weight="600" fill="#17253e">来源标签 → 规范文件名</text>
+<text x="64" y="128.88" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="26" font-weight="600" fill="#245bd7">格式：名称SxxExx_分辨率_动态范围_音轨.扩展名</text>
+<text x="64" y="167.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">虚构作品示例  /  未执行视频探测或云盘改名</text>
+<rect x="64" y="204" width="1472" height="160" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="88" y="244.0" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="25" font-weight="600" fill="#17253e">文件名提供完整标签</text>
+<text x="88" y="284.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">来源  示例剧.S01E01.1080p.HDR10.DDP5.1.mkv</text>
+<text x="88" y="336.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#245bd7">结果  示例剧S01E01_1080P_HDR10_DDP5.1.mkv</text>
+<rect x="64" y="386" width="1472" height="160" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="88" y="426.0" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="25" font-weight="600" fill="#17253e">目录补充缺失标签</text>
+<text x="88" y="466.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">来源  示例剧 4K DV TrueHD7.1.Atmos/Season 01/示例剧.S01E02.mkv</text>
+<text x="88" y="518.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#245bd7">结果  示例剧S01E02_2160P_DV_TrueHD7.1.Atmos.mkv</text>
+<rect x="64" y="568" width="1472" height="160" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="88" y="608.0" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="25" font-weight="600" fill="#17253e">仅存在分辨率标签</text>
+<text x="88" y="648.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">来源  示例剧.S01E03.1080p.mkv</text>
+<text x="88" y="700.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#245bd7">结果  示例剧S01E03_1080P.mkv</text>
+<rect x="64" y="750" width="1472" height="160" rx="18" fill="#ffffff" stroke="#dce3ee"/>
+<text x="88" y="790.0" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="25" font-weight="600" fill="#17253e">无媒体标签</text>
+<text x="88" y="830.36" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="22" font-weight="400" fill="#55657e">来源  示例剧.S01E04.mkv</text>
+<text x="88" y="882.64" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="28" font-weight="600" fill="#245bd7">结果  示例剧S01E04.mkv</text>
+<rect x="64" y="950" width="1472" height="66" rx="14" fill="#edf4f7" stroke="#d8e5ed"/>
+<text x="88" y="990.24" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="23" font-weight="400" fill="#087f70">文件名优先，最近父目录补充；缺失或冲突字段省略；SDR 仅在来源明确标注时添加。</text>
+<text x="64" y="1047.6" font-family="Hiragino Sans GB, PingFang SC, Microsoft YaHei, sans-serif" font-size="20" font-weight="400" fill="#55657e">字幕跟随视频主文件名并保留语言、forced 等后缀；真实作品目录前缀保持一致。</text>
+</svg>

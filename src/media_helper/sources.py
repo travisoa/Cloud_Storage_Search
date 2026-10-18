@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 _SECRET = re.compile(r"cookie|auth|token|password|passcode|secret|credential|api[-_]?key|signature|(?:^|_)(?:pwd|key|sig)(?:$|_)", re.I)
 _PASSWORD_HINT = re.compile(r"提取[码碼]|密[码碼]|解[压壓][码碼]|password|passcode|(?:^|[\s:：?&])pwd\s*[=:：]", re.I)
 _QUALITY_TAGS = {"4320p", "2160p", "1440p", "1080p", "720p", "576p", "480p",
-                 "HEVC", "H.264", "AV1", "Dolby Vision", "HDR10+", "HDR10", "HDR", "HLG"}
+                 "HEVC", "H.264", "AV1", "Dolby Vision", "HDR10+", "HDR10", "HDR", "HLG", "SDR"}
 
 
 def _reject_secrets(value):
@@ -38,6 +38,22 @@ def _text(value, field, limit):
             or _PASSWORD_HINT.search(value)):
         raise ValueError("分享来源的" + field + "无效或包含密码提示")
     return unicodedata.normalize("NFC", value.strip())
+
+
+def source_digest(url):
+    """Hash public URL identity only; query codes never become verifiers.
+
+    Canonical password-free share URLs retain their existing candidate IDs.
+    This is an audit identity, not permission to reuse a password share.
+    """
+    try:
+        parts = urlsplit(url) if isinstance(url, str) else None
+        public_url = (parts.scheme + "://" + (parts.hostname or "") + parts.path
+                      if parts else "")
+    except ValueError:
+        public_url = ""
+    return hashlib.sha256(json.dumps(public_url, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
 
 
 def safe_source(source, *, title=None, parent_id=None, path=None, quality_tags=None):
@@ -65,8 +81,7 @@ def safe_source(source, *, title=None, parent_id=None, path=None, quality_tags=N
         valid = False
     if not valid or url != url.strip() or any(ord(c) < 33 for c in url):
         raise ValueError("订阅来源须为无密码、无参数的 HTTPS pan.quark.cn 分享链接")
-    digest = hashlib.sha256(json.dumps(url, ensure_ascii=False, sort_keys=True,
-                                      separators=(",", ":")).encode()).hexdigest()
+    digest = source_digest(url)
     if source.get("source_hash") is not None and source["source_hash"] != digest:
         raise ValueError("分享来源标识与链接不一致")
     result = {"url": url, "title": _text(title if title is not None else source.get("title", ""), "标题", 500),

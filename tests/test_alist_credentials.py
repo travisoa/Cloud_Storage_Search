@@ -172,6 +172,34 @@ class AListCredentialTests(unittest.TestCase):
         with AListCredentials(Runner([(self.fixture.base, b"")])) as source:
             self.assertEqual(source.load_cookie(1), "old-cookie")
 
+    def test_missing_wal_is_empty_but_other_container_read_failures_stay_closed(self):
+        wal_path = DATABASE_PATH + "-wal"
+        missing_errors = (f"cat: {wal_path}: No such file or directory\n".encode(),
+                          f"cat: can't open '{wal_path}': No such file or directory\n".encode())
+        for stderr in (*missing_errors, b"Permission denied\n", b"container is not running\n", b""):
+            with self.subTest(stderr=stderr):
+                calls = []
+                def runner(command, **kwargs):
+                    calls.append(command)
+                    if command[-1] == wal_path:
+                        return SimpleNamespace(returncode=1, stdout=b"", stderr=stderr)
+                    return SimpleNamespace(returncode=0, stdout=self.fixture.base, stderr=b"")
+                if stderr in missing_errors:
+                    with AListCredentials(runner) as source:
+                        self.assertEqual(source.load_cookie(1), "old-cookie")
+                    self.assertEqual(len(calls), 4)
+                else:
+                    with self.assertRaises(AListCredentialError):
+                        AListCredentials(runner)
+                self.assertTrue(all(command[:4] == ["container", "exec", "alist", "cat"] for command in calls))
+
+    def test_missing_main_database_is_never_treated_as_optional(self):
+        def runner(command, **kwargs):
+            return SimpleNamespace(returncode=1, stdout=b"",
+                                   stderr=f"cat: {command[-1]}: No such file or directory\n".encode())
+        with self.assertRaises(AListCredentialError):
+            AListCredentials(runner)
+
     def test_two_snapshot_mismatches_fail_without_selecting_credentials(self):
         first = self.fixture.pair()
         self.fixture.update_cookie("second-cookie")

@@ -42,7 +42,7 @@ class TaskStore:
             raise ValueError("任务记录不能是符号链接")
         return path
 
-    def create(self, request, *, apply_authorized=False, report=None):
+    def create(self, request, *, apply_authorized=False, report=None, account_scope=None):
         request = deepcopy(request)
         # Freeform text is unnecessary for replay and may contain pasted URLs.
         request.pop("request_text", None)
@@ -56,6 +56,8 @@ class TaskStore:
                 "report": report or {"status": "RESOLVING", "browser_opened": False}}
         if report:
             task["status"] = report.get("status", "UNKNOWN")
+        if account_scope is not None:
+            task["account_scope"] = account_scope
         self.save(task)
         return task
 
@@ -87,6 +89,15 @@ class TaskStore:
         task["report"], task["status"] = report, report.get("status", "UNKNOWN")
         self.save(task)
         return report
+
+
+def replan_request(task):
+    """Start a fresh read-only scope; observed candidate decisions never carry over."""
+    request = deepcopy(task["resolved_request"])
+    for key in ("as_of", "source_selection", "source_episode_mapping", "replace_episodes",
+                "remove_replaced", "request_text", "version_policy", "version_policy_key"):
+        request.pop(key, None)
+    return request
 
 
 def confirmation_request(task, *, quality=None, numeric_episodes=False, selection=None):

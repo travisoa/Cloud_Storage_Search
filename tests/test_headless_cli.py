@@ -27,6 +27,58 @@ class ConversationalRequestTests(unittest.TestCase):
         self.assertFalse(parse_request("只查询《嫁金钗》，不要转存")["save_requested"])
         self.assertFalse(parse_request("先看《嫁金钗》的补齐计划")["save_requested"])
 
+    def test_action_mentions_and_negated_requests_are_read_only(self):
+        for text in (
+            "查询《示例剧》的转存记录", "查一下《示例剧》有没有转存过",
+            "看看《示例剧》是否已保存", "《示例剧》当前转存状态",
+            "帮我查《示例剧》补齐情况", "查询《示例剧》转存失败原因",
+            "《示例剧》保存到哪里了", "《示例剧》转存了吗",
+            "《示例剧》转存是什么", "《示例剧》转存失败",
+            "不要帮我转存《示例剧》", "别给我保存《示例剧》",
+            "不要把《示例剧》转存到网盘", "别给《示例剧》补齐",
+            "查询《示例剧》转存到哪里了", "查看《示例剧》保存到了哪里",
+            "查看《示例剧》转存到夸克的记录", "查询《示例剧》保存到网盘的结果",
+            "暂时不转存《示例剧》", "只看《示例剧》，保存过没有",
+            "我不想转存《示例剧》", "不要追更《示例剧》", "追更《示例剧》",
+            "查询《保存的故事》", "查看《补齐人生》的转存进度",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(parse_request(text)["save_requested"])
+
+    def test_explicit_actions_still_authorize_writes_without_apply_flag(self):
+        for text in (
+            "转存《示例剧》缺失集并规范命名", "请保存《示例剧》",
+            "帮我补齐《示例剧》", "不要计划，直接转存《示例剧》",
+            "按上次计划转存《示例剧》", "查询《示例剧》后存到网盘",
+            "先核对《示例剧》，然后转存缺集", "帮我查下《示例剧》存到我的网盘",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(parse_request(text)["save_requested"])
+
+    def test_titles_with_negation_characters_keep_an_explicit_save(self):
+        for text in ("不良人第二季转存到影库", "特别行动转存到网盘", "不完美受害人存到网盘"):
+            with self.subTest(text=text):
+                self.assertTrue(parse_request(text)["save_requested"])
+        for text in ("别把《示例剧》转存", "先不转存《示例剧》", "请勿转存《示例剧》", "不再补齐《示例剧》"):
+            with self.subTest(text=text):
+                self.assertFalse(parse_request(text)["save_requested"])
+
+    def test_default_and_library_requests_use_the_same_intent_boundary(self):
+        config = {"library_root_id": "synthetic-root"}
+        for text, expected in (("查询《示例剧》的转存记录", False),
+                               ("直接转存《示例剧》", True)):
+            with self.subTest(text=text), patch("media_helper.headless_cli._run", return_value={"status": "READY"}) as run:
+                with redirect_stdout(io.StringIO()):
+                    main(["request", text])
+                self.assertEqual(run.call_args.kwargs["apply"], expected)
+                with patch("media_helper.library_cli._registry") as registry:
+                    from argparse import Namespace
+                    from media_helper.library_cli import run_command
+                    registry.return_value.config_for.return_value = config
+                    run_command(Namespace(library_action="request", library_id="home", text=text,
+                                          plan=False, kind=None), config, None)
+                self.assertEqual(run.call_args.kwargs["apply"], expected)
+
     def test_quoted_title_is_never_interpreted_as_a_command_or_year(self):
         for title in ("请回答1988", "给我一支烟", "保存的故事"):
             result = parse_request("帮我查下《" + title + "》")

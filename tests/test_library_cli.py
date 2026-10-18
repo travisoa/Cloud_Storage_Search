@@ -162,6 +162,43 @@ class LibraryCommandTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.command(["scan", "family", "--source-id", result["root_id"]])
 
+    def test_scan_saves_real_source_directory_chain_for_tv_root(self):
+        self.initialize()
+        self.storage.rows['0'].append(folder('source-tv', '电视剧', '0'))
+        self.storage.rows['source-tv'] = [folder('source-show', '示例 (2026)', 'source-tv')]
+        self.storage.rows['source-show'] = []
+        self.storage.listed.clear()
+        result = self.command(['scan', 'family', '--source-id', 'source-show'])
+        snapshot = _load_record(self.root, 'scans', result['scan_id'], 'family')
+        self.assertEqual(snapshot['source_context']['ancestors'], ['电视剧', '示例 (2026)'])
+        self.assertNotIn(self.registry.get_library('family')['library_root_id'], self.storage.listed)
+
+    def test_scan_binds_configured_category_kind_even_with_a_custom_name(self):
+        self.initialize(drive_id='current', parent_id='existing-library', library_id='trial', test=True)
+        self.storage.rows['existing-library'].append(folder('old-tv', '自定义分类', 'existing-library'))
+        self.storage.rows['old-tv'] = []
+        result = self.command(['scan', 'trial', '--source-id', 'old-tv'])
+        self.assertEqual(result['source_context'], {'ancestors': ['自定义分类'], 'kind': 'tv'})
+
+    def test_legacy_scan_gets_live_root_context_before_building_an_import_plan(self):
+        from media_helper.library_identity import MediaResolver
+        from media_helper.library_import import _digest, _scan_payload
+        from tests.test_library_identity import Metadata
+        self.initialize()
+        self.storage.rows['0'].append(folder('source-tv', '电视剧', '0'))
+        self.storage.rows['source-tv'] = [dict(folder('feature', '示例电影.2025.mkv', 'source-tv', False), size=123)]
+        result = self.command(['scan', 'family', '--source-id', 'source-tv'])
+        legacy = _load_record(self.root, 'scans', result['scan_id'], 'family')
+        legacy.pop('source_context')
+        legacy['snapshot_hash'] = _digest(_scan_payload(legacy))
+        scan_id = _save_record(self.root, 'scans', 'family', legacy)
+        with patch('media_helper.library_cli._media_resolver', return_value=MediaResolver(Metadata())):
+            planned = self.command(['plan', 'family', scan_id])
+        self.assertEqual(planned['operations'], [])
+        self.assertEqual(planned['review'][0]['reason'], 'explicit_season_and_episode_required')
+        self.assertEqual(planned['scan']['source_context'], {'ancestors': ['电视剧']})
+        self.assertEqual(planned['scan']['snapshot_hash'], _digest(_scan_payload(planned['scan'])))
+
     def test_scan_for_current_test_cannot_escape_original_library(self):
         self.initialize(drive_id="current", parent_id="existing-library", library_id="trial", test=True)
         with self.assertRaises(ValueError):

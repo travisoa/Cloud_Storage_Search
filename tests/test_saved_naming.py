@@ -86,16 +86,16 @@ class SavedNamingTests(unittest.TestCase):
         self.assertEqual(result["status"], "READY", result)
         self.assertFalse(result["writes_attempted"])
         self.assertEqual(result["naming_prefix"], "测试剧 (2026)")
-        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026) S01E02 [2160p].mkv")
-        self.assertEqual(result["plan"][1]["target_name"], "测试剧 (2026) S01E02 [2160p].zh-Hans.forced.ass")
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P.mkv")
+        self.assertEqual(result["plan"][1]["target_name"], "测试剧 (2026)S01E02_2160P.zh-Hans.forced.ass")
         self.assertEqual((self.storage.folders, self.journal.records, self.journal.events), before)
 
     def test_apply_only_verified_new_fids_and_keep_real_source_names(self):
         old = deepcopy(self.storage.folders["season"][0])
         result = self.run_normalize(apply=True)
         self.assertEqual(result["status"], "COMPLETE", result)
-        self.assertEqual(self.storage.renamed, [("new-2", "测试剧 (2026) S01E02 [2160p].mkv"),
-            ("new-sub-2", "测试剧 (2026) S01E02 [2160p].zh-Hans.forced.ass")])
+        self.assertEqual(self.storage.renamed, [("new-2", "测试剧 (2026)S01E02_2160P.mkv"),
+            ("new-sub-2", "测试剧 (2026)S01E02_2160P.zh-Hans.forced.ass")])
         self.assertEqual(self.storage.folders["season"][0], old)
         base = self.journal.get(self.key)
         self.assertEqual(base["operations"][0]["files"][0]["name"], "02.mkv")
@@ -141,7 +141,7 @@ class SavedNamingTests(unittest.TestCase):
         self.assertEqual(self.storage.renamed, [])
 
     def test_target_conflict_preserves_all_files(self):
-        self.storage.folders["season"].append(file("external", "测试剧 (2026) S01E02 [2160p].mkv", "season"))
+        self.storage.folders["season"].append(file("external", "测试剧 (2026)S01E02_2160P.mkv", "season"))
         before = deepcopy(self.storage.folders)
         result = self.run_normalize(apply=True)
         self.assertEqual(result["status"], "NEEDS_INPUT", result)
@@ -215,13 +215,84 @@ class SavedNamingTests(unittest.TestCase):
     def test_quality_preference_does_not_create_unobserved_resolution_label(self):
         self.receipt["plan"][0].pop("media_info")
         result = self.run_normalize(request={**self.request, "quality_preference": ["2160p"]})
-        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026) S01E02.mkv")
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02.mkv")
 
     def test_unsubstantiated_media_claims_block_the_plan(self):
         self.receipt["plan"][0]["media_info"] = {"resolution": "2160p", "inspection": "release_labels_only"}
         result = self.run_normalize(apply=True)
         self.assertEqual(result["status"], "NEEDS_INPUT", result)
         self.assertEqual(self.storage.renamed, [])
+
+    def test_recorded_directory_audio_labels_are_preserved_with_subtitles(self):
+        self.receipt["plan"][0]["media_info"] = media_info("02.mkv", "测试剧 4K SDR DDP5.1")
+        result = self.run_normalize()
+        self.assertEqual(result["status"], "READY", result)
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P_SDR_DDP5.1.mkv")
+        self.assertEqual(result["plan"][1]["target_name"], "测试剧 (2026)S01E02_2160P_SDR_DDP5.1.zh-Hans.forced.ass")
+
+    def test_audio_requires_matching_recorded_provenance(self):
+        for audio_info in (
+                {"audio": "DDP5.1"},
+                {"audio": "DDP5.1", "audio_basis": "filename", "audio_evidence": [
+                    {"source": "filename", "text": "02.DDP5.1.mkv", "value": "DDP5.1"}]},
+                {"audio": "DDP5.1", "audio_basis": "parent_directory", "audio_evidence": [
+                    {"source": "parent_directory", "text": "DDP2.0", "value": "DDP5.1"}]},
+                {"audio": "DDP5.1", "audio_basis": "parent_directory", "audio_evidence": [
+                    {"source": "parent_directory", "text": "DDP5.1", "value": "DDP"}]},
+                {"audio": "DDP5.1", "audio_basis": "parent_directory", "audio_evidence": None}):
+            with self.subTest(audio_info=audio_info):
+                receipt = deepcopy(self.receipt)
+                receipt["plan"][0]["media_info"].update(audio_info)
+                result = self.run_normalize(apply=True, receipt=receipt)
+                self.assertEqual(result["status"], "NEEDS_INPUT", result)
+                self.assertEqual(result["validation_error"], "media_labels_require_recorded_provenance")
+        self.assertEqual(self.storage.renamed, [])
+
+    def test_legacy_audio_can_come_from_saved_source_filename(self):
+        name = "测试剧.S01E02.DDP5.1.mkv"
+        subtitle = "测试剧.S01E02.DDP5.1.zh-Hans.forced.ass"
+        for record in (self.receipt, self.journal.records[self.key]):
+            record["plan"][0]["source"]["name"] = name
+            record["plan"][1]["source"]["name"] = subtitle
+            for field in ("files", "verified_files"):
+                record["operations"][0][field][0]["name"] = name
+                record["operations"][0][field][1]["name"] = subtitle
+        info = self.receipt["plan"][0]["media_info"]
+        for field in ("audio", "audio_basis", "audio_evidence"):
+            info.pop(field, None)
+        result = self.run_normalize()
+        self.assertEqual(result["status"], "READY", result)
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P_DDP5.1.mkv")
+        self.assertEqual(result["plan"][0]["media_info"]["audio_basis"], "filename")
+
+    def test_legacy_audio_can_come_from_validated_recorded_directory_text(self):
+        info = media_info("02.mkv", "测试剧 4K DDP5.1")
+        for field in ("audio", "audio_basis", "audio_evidence"):
+            info.pop(field, None)
+        self.receipt["plan"][0]["media_info"] = info
+        result = self.run_normalize()
+        self.assertEqual(result["status"], "READY", result)
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P_DDP5.1.mkv")
+        self.assertEqual(result["plan"][0]["media_info"]["audio_basis"], "parent_directory")
+
+    def test_unvalidated_legacy_evidence_does_not_add_audio(self):
+        info = self.receipt["plan"][0]["media_info"]
+        for field in ("audio", "audio_basis", "audio_evidence"):
+            info.pop(field, None)
+        info["codec_evidence"] = [{"source": "parent_directory", "text": "DDP5.1", "value": "HEVC"}]
+        result = self.run_normalize()
+        self.assertEqual(result["status"], "READY", result)
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P.mkv")
+
+    def test_conflicting_recorded_legacy_directory_audio_is_omitted(self):
+        info = media_info("02.mkv", "测试剧 4K DDP5.1/HEVC AAC2.0")
+        for field in ("audio", "audio_basis", "audio_evidence"):
+            info.pop(field, None)
+        self.receipt["plan"][0]["media_info"] = info
+        result = self.run_normalize()
+        self.assertEqual(result["status"], "READY", result)
+        self.assertEqual(result["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P.mkv")
+        self.assertIsNone(result["plan"][0]["media_info"]["audio"])
 
 
 if __name__ == "__main__":

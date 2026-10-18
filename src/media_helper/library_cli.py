@@ -67,20 +67,8 @@ def _registry(root):
 
 
 def _storage(drive, cookie=None):
-    from .providers import QuarkProvider
-    source = drive['credential_source']
-    if cookie is None and source['type'] == 'file':
-        from .credentials import read_secret
-        cookie = read_secret(source['name']).get('cookie')
-        if not isinstance(cookie, str) or not cookie:
-            raise ValueError('私有凭据文件中没有 Cookie')
-    elif cookie is None:
-        from .alist_credentials import AListCredentials
-        with AListCredentials() as reader:
-            cookie = reader.load_cookie(source['storage_id'])
-    storage = QuarkProvider(cookie=cookie)
-    storage.account_scope = drive['account_scope']
-    return storage
+    from .storage_connection import storage
+    return storage(drive, cookie=cookie)
 
 
 def _file_credential(args, registry, config):
@@ -113,14 +101,14 @@ def _file_credential(args, registry, config):
     return result
 
 
-def _reachable(storage, root_id, selected_id):
+def _reachable(storage, root_id, selected_id, *, excluded_ids=()):
     """Prove current-drive operations stay within its already authorized root."""
     root_id, selected_id = identifier(root_id), identifier(selected_id)
     if selected_id == root_id:
-        return
-    queue, seen = deque([root_id]), {root_id}
+        return []
+    queue, seen = deque([(root_id, [])]), {root_id}
     while queue:
-        parent = queue.popleft()
+        parent, ancestors = queue.popleft()
         rows = storage.list_files(parent)
         if not isinstance(rows, list):
             raise ValueError('目录读取不完整，无法确认范围')
@@ -134,19 +122,25 @@ def _reachable(storage, root_id, selected_id):
                 raise ValueError('目录返回重复 fid')
             local.add(fid)
             if row.get('is_dir', row.get('dir')):
+                if fid in excluded_ids:
+                    continue
+                name = row.get('name', row.get('file_name'))
+                if not isinstance(name, str) or not name or any(c in name for c in '/\\') or any(ord(c) < 32 for c in name):
+                    raise ValueError('目录名称不完整，无法确认范围')
+                chain = [*ancestors, {'fid': fid, 'name': name, 'parent_id': parent}]
                 if fid == selected_id:
-                    return
+                    return chain
                 if fid in seen or len(seen) >= 10000:
                     raise ValueError('目录范围核验存在循环或超出上限')
                 seen.add(fid)
-                queue.append(fid)
+                queue.append((fid, chain))
     raise ValueError('所选目录不在当前已授权影库范围内')
 
 
-def _scope(storage, drive, selected_id):
+def _scope(storage, drive, selected_id, *, with_context=False, excluded_ids=()):
     identifier(selected_id, '目录 ID')
-    if drive.get('boundary_root_id'):
-        _reachable(storage, drive['boundary_root_id'], selected_id)
+    if drive.get('boundary_root_id') or with_context:
+        return _reachable(storage, drive.get('boundary_root_id', '0'), selected_id, excluded_ids=excluded_ids)
 
 
 def _load_record(root, kind, record_id, library_id):
@@ -233,10 +227,21 @@ def _with_library(args, registry, config, root):
         raise ValueError('初始化的影库目录身份发生变化，需先对账')
     account = hashlib.sha256(drive['account_scope'].encode()).hexdigest()
     scoped_library = {**library, 'account_scope_hash': account}
+
+    def source_context_for(source_id):
+        source_chain = _scope(storage, drive, source_id, with_context=True,
+                              excluded_ids=[library['library_root_id']])
+        source_context = {'ancestors': [row['name'] for row in source_chain]}
+        source_categories = list(config.get('categories', {}).items()) if drive.get('boundary_root_id') == config.get('library_root_id') else []
+        for kind, category in [*source_categories, *library['categories'].items()]:
+            fid = category.get('folder_id') if isinstance(category, dict) else category
+            if kind in {'tv', 'movie'} and any(row['fid'] == fid for row in source_chain):
+                source_context['kind'] = kind
+        return source_context
+
     if args.library_action == 'scan':
-        _scope(storage, drive, args.source_id)
         result = scan(storage, source_id=args.source_id, excluded_ids=[library['library_root_id']],
-                      max_entries=args.max_entries, max_depth=args.max_depth)
+                      max_entries=args.max_entries, max_depth=args.max_depth, source_context=source_context_for(args.source_id))
         record_id = _save_record(root, 'scans', args.library_id, result)
         return {**result, 'scan_id': record_id, 'library_id': args.library_id,
                 'counts': dict(Counter(row['kind'] for row in result['entries'])), 'browser_opened': False}
@@ -245,7 +250,8 @@ def _with_library(args, registry, config, root):
         if snapshot.get('account_scope_hash') != account:
             raise ValueError('扫描来自其他网盘账号，不能复用')
         _scope(storage, drive, snapshot['source_id'])
-        result = plan_import(snapshot, scoped_library, _media_resolver(args, root))
+        context = {'source_context': source_context_for(snapshot['source_id'])} if 'source_context' not in snapshot else {}
+        result = plan_import(snapshot, scoped_library, _media_resolver(args, root), **context)
         plan_id = _save_record(root, 'plans', args.library_id, result)
         return {**result, 'plan_id': plan_id, 'scan_id': args.scan_id,
                 'library_id': args.library_id, 'browser_opened': False}

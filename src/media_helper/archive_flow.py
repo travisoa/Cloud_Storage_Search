@@ -63,6 +63,8 @@ def fetch(storage, *, candidate, source, library_root_id, journal, job_key, appl
             for key in ("task_id", "archive_fid"):
                 if state.get(key):
                     report[key] = state[key]
+            if state.get("task_id"):
+                report["save_task_id"] = state["task_id"]
         return report
 
     def verify_target(*, empty=False):

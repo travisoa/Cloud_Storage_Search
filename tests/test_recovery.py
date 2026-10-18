@@ -259,6 +259,30 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(report["status"], "NEEDS_INPUT", report)
         self.assertEqual(self.storage.tasks, [])
 
+    def test_changed_account_scope_cannot_bypass_legacy_execution_record(self):
+        record = self.record()
+        old_identity = dict(self.identity, account_scope="quark-root:root")
+        old_key = "season:" + workflow._digest(old_identity)
+        self.journal.records = {old_key: {**record, "identity": old_identity}}
+        self.storage.account_scope = "quark:alist-storage:family"
+        self.storage.legacy_account_scopes = ("quark-root:root",)
+        report = self.run_recovery()
+        self.assertEqual(report["status"], "NEEDS_INPUT", report)
+        self.assertEqual(report["reasons"], ["legacy_account_scope_requires_confirmation"])
+        self.assertEqual(report["legacy_job_key"], old_key)
+        self.assertEqual((self.storage.reads, self.storage.tasks, self.metadata.calls), ([], [], []))
+
+    def test_current_account_record_is_used_even_if_a_legacy_record_exists(self):
+        self.storage.account_scope = "quark:alist-storage:family"
+        self.storage.legacy_account_scopes = ("quark-root:root",)
+        self.identity = workflow._job_identity(self.request, self.storage)
+        self.key = "season:" + workflow._digest(self.identity)
+        self.record()
+        old_identity = dict(self.identity, account_scope="quark-root:root")
+        self.journal.records["season:" + workflow._digest(old_identity)] = {"identity": old_identity, "state": "unknown"}
+        report = self.run_recovery()
+        self.assertEqual(report["status"], "READY_TO_RENAME", report)
+
 
 if __name__ == "__main__":
     unittest.main()

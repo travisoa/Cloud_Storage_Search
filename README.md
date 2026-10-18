@@ -1,160 +1,135 @@
-# 后台网盘影库助手
+# 网盘影库助手
 
-你在对话中说“帮我查下《嫁金钗》，存到我的夸克并重命名”，助手在后台核对影库已有资源、查询预计季集、搜索缺集、转存并规范命名。全程不打开网页，Infuse 继续使用原有 AList 链路。
+基于对话指令的影库管理工具。核对作品身份、预计季集与网盘库存，搜索缺失资源，在授权范围内完成夸克转存、文件核验和规范命名。通过命令行执行，播放端沿用现有 AList / Infuse。
 
-## 当前能力
+## 工作流程
 
-- TMDB 精确匹配支持 ID/详情链接、年份、同 ID 别名及公共 ID 交叉核验；TVmaze 原主身份保留，区分预计播出、未来和时间未知。
-- 读取真实夸克目录，复用原剧目录和分类，只补明确缺失集。
-- 电影按 TMDB 片名+年份或 ID 精确确认，在电影分类核对是否已有，再搜索、转存唯一版本并命名为 `片名 (年份) [标签].扩展名`；同级版本交由对话选择。
-- PanSou 后台搜索，实际枚举分享文件后选择来源；按剧保存分辨率、回退、编码/HDR、大小及发布标签策略。同级版本或纯数字集号经对话确认后继续同一任务。
-- 作品目录与视频文件共用同一剧名前缀，季集号后可保留分辨率、编码及 HDR 标签，字幕同步命名。来源标签有据可查，不冒充媒体探测。
-- 转存提交后立即保存任务 ID；支持只读对账及恢复，不重复提交结果未知的转存。
-- 按作品和季订阅追更，复用确认过的分享目录，结合更新日程与真实库存补缺；支持暂停、只读检查与异常阻断。
-- 新网盘可先创建影库及五类目录，再选择是否扫描、匹配作品和按保存计划导入；初始化不会自动整理已有资源。
-- 只读影库体检，报告命名、季集、多版本、字幕及压缩分卷问题，可选核对元数据预计日程。
-- 压缩包全链路均须显式指令：搜索中选定的单文件压缩包可转存到隔离目录，云解压后核验输出，再生成普通入库计划整理进电影/电视剧分类。分卷与带密码的包仍需人工处理。
-- 单个作品目录可原地规范命名：视频统一用真实目录名作前缀，字幕跟随；只改名不移动，歧义、重复版本与冲突保留原样。
-- 默认不改名或移动旧资源；整理须先生成计划，再经用户明确授权执行该计划。不覆盖、不删除，未知写入结果不自动重发。
+![作品核对、缺集搜索、转存核验与规范命名流程](docs/assets/workflow.png)
 
-当前真实联调状态和未完成项见 [验证报告](docs/test-report.md)。
+流程图为功能示意。预计日程、搜索线索和真实文件分别核验；出现作品、季集或版本歧义时返回待确认项。
 
-精确匹配、体检、版本策略及压缩包命令见[影库维护说明](docs/media-maintenance.md)。
+| 能力 | 范围 |
+| --- | --- |
+| 作品匹配 | TMDB / TVmaze 身份、年份、别名及公共 ID 核对；电影使用 TMDB |
+| 缺集转存 | 读取真实库存，仅补明确缺集；PanSou 搜索后实际枚举分享文件 |
+| 统一命名 | 复用作品目录名前缀，按来源标签补充分辨率、动态范围与音轨，字幕同步 |
+| 持续追更 | 按作品和季订阅，复用已确认来源，支持暂停、阻断与恢复 |
+| 影库维护 | 只读体检、版本策略、新网盘建库、旧资源整理及单包隔离云解压 |
+| 执行恢复 | 持久化任务 ID 和操作意图，按真实文件 ID 对账，避免重复提交 |
 
-## 对话任务入口
+当前存储适配器支持夸克。其他网盘需新增 Provider；特殊季集、同级版本和覆盖冲突不自动处理。真实验收与尚未验证的边界见[验证报告](docs/test-report.md)。
 
-以下命令供助手在后台调用，不需要用户打开网页或填写表单：
+## 首次配置
 
-```bash
-python3 scripts/media.py request '帮我查下《嫁金钗》，存到我的夸克网盘并重命名'
-python3 scripts/media.py request '只查询《嫁金钗》，不要转存' --plan
-python3 scripts/media.py doctor
-```
+运行环境为 Python 3.11+，以及可用的 Apple Container（macOS）、Docker 或 Podman。引用 AList 凭据还要求当前 Python 的 SQLite 构建支持 `sqlite3.Connection.deserialize`；程序会在读取前检测此能力。Python 模块仅依赖标准库；容器运行时用于 PanSou 搜索服务。
 
-明确请求保存时 `request` 可执行；否定写入、预览或 `--plan` 只做查询和计划。请求中出现“电影”时按电影处理，也可用 `--kind movie|tv` 指定；电影需要年份或 TMDB ID，例如 `request '帮我找电影《沙丘2》 2024，存到夸克'`。作品或目录不确定时返回结构化待确认项，由对话解决，不自动采用第一条搜索结果。
-
-命名示例：`剧名 (2026)/Season 01/剧名 (2026) S01E01 [2160p].mkv`。已有作品优先沿用真实作品目录名；缺少媒体信息时不添加猜测标签。统一命名有助于识别，封面仍取决于 Infuse 的元数据匹配与刷新，不能以云盘改名成功代替播放器验收。
-
-已确认作品也可调用 `sync --title ... --year ... --season ... --series-id ... --metadata-source tvmaze --apply`。影库根目录与凭据来源在 [config/headless.json](config/headless.json)，目录 ID 与 AList 展示路径不混用。
-
-## 新网盘建库
-
-新夸克账号可引用其已有 AList 挂载，在指定位置创建 `影库/电影、电视剧、动漫、纪录片、综艺`。完成后可直接结束，也可选择扫描已有资源并预览整理方案；不会切换当前影库或追更。
+1. 从 [config/headless.example.json](config/headless.example.json) 创建本地 `config/headless.json`；已有配置应保留。填写真实影库根目录及分类目录 ID，目录 ID 与 AList 展示路径不能混用。
+2. 配置夸克凭据。使用私有 Cookie 文件时执行 `configure-quark`；引用已有 AList 挂载时改用 `configure-alist --storage-id N`，两种方式择一。
+3. 使用电影功能或 TMDB 元数据时配置 TMDB 令牌，然后启动搜索服务并执行只读自检。
 
 ```bash
-python3 scripts/media.py library drives
-python3 scripts/media.py library connect --drive-id second-quark --alist-storage-id 2
-python3 scripts/media.py library init --drive-id second-quark --library-id family --parent-id 0 --name 影库 --version-preset balanced --plan
-```
-
-建库时可选影库版本预设：`quality`（品质优先）、`balanced`（兼顾品质与存储）、`storage`（节省存储），之后用 `library preset [影库ID] --set ...` 修改，不带影库ID时作用于当前默认影库。预设只影响之后的待补资源，不替换已存文件。
-
-实际执行加 `--apply`；可选扫描、整理和新影库请求见[建库与导入说明](docs/library-bootstrap.md)。本轮已在当前网盘的隔离测试目录验证创建结构与3集扫描预览，未迁移旧资源。其他网盘写入仍需 Provider 适配。
-
-## 同一任务的确认与恢复
-
-正式入口返回本地 `task_id`，助手用它传递用户确认和继续执行，无需创建单剧脚本：
-
-```bash
-python3 scripts/media.py status TASK_ID
-python3 scripts/media.py confirm TASK_ID --quality 2160p --numeric-episodes --remember-quality --apply
-python3 scripts/media.py reconcile TASK_ID
-python3 scripts/media.py resume TASK_ID --apply
-python3 scripts/media.py normalize-saved TASK_ID --apply
-```
-
-电影任务用 `confirm TASK_ID --selection '{"movie":"候选ID"}' --apply` 或 `--quality 2160p` 选定版本。`confirm` 从本任务已枚举的候选快照选择，执行前重新核验真实文件名、大小和来源。`--numeric-episodes` 只表示本次明确确认的数字集号映射。`reconcile` 只读取任务状态与目录；`resume`、`confirm`、`normalize-saved` 不带 `--apply` 时均不写云盘。命名修正还须同时通过原转存凭据、日志和真实新 fid 的核对。
-
-中文名未被元数据收录时，助手核实来源后用 `bind-series` 保存作品 ID、年份、远端原名、中文别名及 HTTPS 依据；每次复用仍检查远端身份。画质偏好只作用于绑定作品。详见[执行约定](docs/headless-design.md)。
-
-## 压缩包与原地整理
-
-```bash
-python3 scripts/media.py archive fetch TASK_ID --candidate-id 候选ID --plan
-python3 scripts/media.py archive fetch TASK_ID --candidate-id 候选ID --apply --extract
-python3 scripts/media.py archive plan --fid 压缩包FID
-python3 scripts/media.py archive organize PLAN_ID --apply
-python3 scripts/media.py tidy plan --folder-id 作品目录ID
-python3 scripts/media.py tidy apply PLAN_ID --apply
-```
-
-每一步不带 `--apply` 时只读。边界与恢复方式见[影库维护说明](docs/media-maintenance.md)。
-
-## 智能追更
-
-订阅从已确认任务导入作品身份、影库目录和来源。用户已授权的首批范围为《白色黑手党时代》第 1 季：每 6 小时检查，优先沿用已选 4K 分享目录，有明确缺集和可用文件时自动转存并命名，无变化不通知。周期唤醒通过 Codex heartbeat 启用；后台服务命令本身不创建调度。
-
-```bash
-python3 scripts/media.py watch add --task-id TASK_ID --interval-hours 6 --auto-save
-python3 scripts/media.py watch list
-python3 scripts/media.py watch status SUBSCRIPTION_ID
-python3 scripts/media.py watch run --subscription-id SUBSCRIPTION_ID --force --plan
-python3 scripts/media.py watch run --due --apply
-python3 scripts/media.py watch pause SUBSCRIPTION_ID
-python3 scripts/media.py watch resume SUBSCRIPTION_ID
-```
-
-`watch run` 默认只读；云盘写入同时要求订阅已获 `--auto-save` 授权、执行带 `--apply` 且未阻断。`--plan` 始终只读。`resume` 恢复检查不会自动解除异常阻断；`resume --clear-block` 先只读对账，满足恢复条件后才解除，后续执行仍遵循写入权限。
-
-元数据只表示预计更新；分享目录真实存在的视频才可转存。已绑定的 TVmaze 身份保留为主来源，TMDB 经外部作品 ID 核验后补充；季集或日期冲突暂停自动执行。已确认来源的纯数字集号可通过 `--numeric-source` 固定到同一分享目录、季和画质；新来源或版本歧义仍交由对话确认。配置与完整执行边界见[当前设计](docs/headless-design.md)。
-
-## 凭据
-
-两种来源，按网盘连接分别选择：
-
-- **引用 AList 挂载**：`configure-alist`（默认影库）或 `library connect --alist-storage-id N`。运行时从 AList 数据库读出 Cookie，只在内存中使用，AList 里更新后自动跟上。依赖本机 Apple Container 中的 `alist` 容器。
-- **私有凭据文件**（macOS 与 Linux 通用）：`configure-quark`（默认影库）或 `library connect --drive-id X --cookie`；过期后用 `library credential --drive-id X` 替换，替换前核对仍能看到该网盘已登记的影库，防止换成其他账号。TMDB 密钥用 `configure-tmdb`。
-
-```bash
+# 录入夸克 Cookie，保存为私有凭据文件，并将默认影库切换为文件凭据来源
 python3 scripts/media.py configure-quark
-python3 scripts/media.py library connect --drive-id family --cookie
-printf '%s\n' "$QUARK_COOKIE" | python3 scripts/media.py library credential --drive-id family
+
+# 录入 TMDB API 读取令牌，用于电影身份匹配及 TMDB 作品、季集与日程查询
+python3 scripts/media.py configure-tmdb
+
+# 启动 PanSou 网盘搜索服务；不执行转存，也不创建追更调度
+python3 scripts/manage.py up
+
+# 检查本地配置与搜索服务，并只读列出影库根目录，验证夸克访问权限
 python3 scripts/media.py doctor --check-quark
 ```
 
-在终端运行时隐藏输入；无终端的服务器可从标准输入传一行。凭据不接受命令行参数，不打印，也不发送到聊天或 Git。文件默认在被忽略的 `runtime/secrets/`，可用 `MEDIA_HELPER_SECRETS_DIR` 改到其他私有目录。存放位置、权限要求、环境变量覆盖和部署步骤见[密钥存储与配置](docs/credentials.md)。
+凭据由终端隐藏输入，不接受明文命令行参数。AList 引用仅适用于本机 Apple Container 中的已有挂载；其他部署可使用私有凭据文件。文件权限、环境变量、容器平台及部署要求见[密钥存储与配置](docs/credentials.md)。
 
-## 后台服务
+`manage.py` 仅管理本项目的 PanSou 服务，默认监听 `127.0.0.1:8888`。服务状态与停止命令为 `python3 scripts/manage.py status`、`python3 scripts/manage.py stop`；不修改或重启 AList / Infuse，也不创建定时调度。
+
+## 常用命令
+
+统一入口为 `scripts/media.py`。以下名称、年份和标识符均为示例，执行时应替换为目标作品及实际任务 ID。
 
 ```bash
-python3 scripts/manage.py up
-python3 scripts/manage.py status
-python3 scripts/manage.py stop
+# 只读查询与计划
+python3 scripts/media.py request '查询《示例剧》，仅生成计划' --plan
+python3 scripts/media.py request '查询电影《示例电影》 2025，仅生成计划' --plan
+
+# 已获授权的转存请求
+python3 scripts/media.py request '转存《示例剧》缺失集并规范命名'
+
+# 查看、确认与恢复同一任务
+python3 scripts/media.py status TASK_ID
+python3 scripts/media.py confirm TASK_ID --quality 2160p --apply
+python3 scripts/media.py reconcile TASK_ID
+python3 scripts/media.py resume TASK_ID --apply
+python3 scripts/media.py normalize-saved TASK_ID
+# 跨日重新检查：生成新的只读计划，重新确认候选后再执行
+python3 scripts/media.py replan TASK_ID
+# 旧根目录范围日志阻断时：只读核对其已存文件，确认后加 --apply 迁入当前连接（仅写本地日志）
+python3 scripts/media.py adopt-scope JOB_KEY
 ```
 
-`manage.py` 按 Apple container（仅 macOS）、`docker`、`podman` 的顺序自动选用容器运行时，也可用 `MEDIA_HELPER_CONTAINER_RUNTIME` 指定；本机沿用 Apple container，Linux 用法见[密钥存储与配置](docs/credentials.md#部署到其他机器)。它只管理 PanSou API，不启停 AList 或旧网页容器。追更调度与服务启停独立；首批6小时 Codex heartbeat 已启用，只检查指定且启用的订阅，不自动扩大范围。本机及 Codex 需可运行，首次定时触发仍待实际观察。
+| 命令类型 | 执行规则 |
+| --- | --- |
+| `request` / `library request` | 根据请求文本判断是否执行；明确转存请求可写入，否定写入、预览或 `--plan` 保持只读 |
+| `sync`、转存、解压、整理及 `watch run` | 云盘写入要求 `--apply`；支持 `--plan` 的命令中，`--plan` 优先 |
+| `confirm` / `resume` / `normalize-saved` | 省略 `--apply` 时只读；这些命令不接受 `--plan` |
+| `status` / `reconcile` / `replan` / 体检与计划 | 不写云盘；允许保存本地任务、计划或报告 |
+| `adopt-scope` | 只读核对旧范围记录；`--apply` 仅写本地任务日志，不写云盘 |
 
-## 验证与来源
+确认与恢复均复用正式任务。`confirm` 仅接受已枚举候选；纯数字集号须有明确映射，不能按排序推断。详细身份、来源和恢复规则见[执行约定](docs/headless-design.md)。
+
+## 命名示例
+
+![来源文件名与目录标签生成新文件名，缺失字段逐项省略](docs/assets/naming-examples.png)
+
+图片使用虚构作品说明规则，不是云盘操作截图。文件名优先于最近父目录的标签；缺失或冲突字段省略。只有显式 SDR 标签才输出 `SDR`，当前不下载视频或探测码流。完整格式、音轨与字幕规则见[命名与媒体信息](docs/headless-design.md#命名与媒体信息)。
+
+新格式用于之后生成的计划，不批量迁移现有文件或旧任务日志。默认保留旧资源；旧文件整理须执行已获授权的保存计划，不覆盖目标文件。明确授权替换指定剧集并使用 `--remove-replaced` 时，新版本核验完成后才将记录中的旧文件移入回收站。
+
+## 扩展操作
+
+| 场景 | 入口与文档 |
+| --- | --- |
+| 新网盘接入、建库、扫描与导入 | `library`；[建库与导入说明](docs/library-bootstrap.md) |
+| 精确匹配、体检与版本策略 | `match` / `health` / `policy`；[影库维护说明](docs/media-maintenance.md) |
+| 压缩包转存、隔离解压与入库 | `archive`；[压缩包流程](docs/media-maintenance.md#从搜索结果转存压缩包并入库) |
+| 单个作品目录原地改名 | `tidy`；[原地规范命名](docs/media-maintenance.md#单个作品目录原地规范命名) |
+| 订阅与周期检查 | `watch`；[订阅执行约定](docs/headless-design.md#订阅与周期检查) |
+
+建库仅创建目录，不自动整理旧资源、切换默认影库或创建订阅。生产影库支持电影与电视剧请求；新影库的追更尚未接入。持续追更由 `watch` 保存订阅、Codex heartbeat 周期唤醒，仅执行启用且已获授权的作品和季，阻断状态不会自动清除。
+
+## 验证与文档
 
 ```bash
+# 本地模拟测试，不操作真实云盘
 PYTHONPATH=src python3 -m unittest discover -s tests
+
+# 搜索服务已启动时的只读检查
 python3 scripts/smoke.py
 ```
 
-后台模块只用 Python 标准库。旧网页验证记录在 `docs/archive/`，不作为当前后台执行验收。
+模拟测试与真实执行验收分别记录；服务、凭据和订阅的当前状态以实际检查为准。
 
-[当前设计](docs/headless-design.md) · [更新来源](docs/metadata-assessment.md) · [验证状态](docs/test-report.md)
+- [执行约定](docs/headless-design.md)：模块、授权范围、命名与恢复规则。
+- [季集更新来源](docs/metadata-assessment.md)：元数据关联、预计日程与库存的区别。
+- [验证报告](docs/test-report.md)：真实验收、模拟覆盖及未验证限制。
+- [历史记录](docs/archive/)：旧网页方案的验证资料，不作为当前功能验收。
 
-## 致谢
+## 参考项目与资料
 
-本项目的设计和接口核对参考了以下开源项目与公开资料，感谢各位作者的工作：
+设计与接口行为参考以下项目；执行器在 `src/media_helper/` 中独立实现，未导入其源码。
 
-- [PanSou](https://github.com/fish2018/pansou)（fish2018）：网盘资源搜索服务，本项目以独立容器方式调用其 API 作为后台搜索来源。
-- [Quark Auto Save X](https://github.com/x1ao4/quark-auto-save-x)（x1ao4）及其上游 [quark-auto-save](https://github.com/Cp0204/quark-auto-save)（Cp0204）：夸克分享读取、转存、任务查询与云解压等接口的行为参考。
-- [AList](https://github.com/AlistGo/alist)：夸克驱动中的文件移动接口参考；本项目也可引用本机 AList 挂载中的 Cookie。
-- [TMDB](https://developer.themoviedb.org/) 与 [TVmaze](https://www.tvmaze.com/api)：作品身份、别名与播出日程数据。
-- [Infuse Metadata 101](https://support.firecore.com/hc/en-us/articles/215090947-Metadata-101)（Firecore）：影视目录与文件命名规范。
+- [PanSou](https://github.com/fish2018/pansou)：网盘搜索服务。
+- [Quark Auto Save X](https://github.com/x1ao4/quark-auto-save-x) 及其上游 [quark-auto-save](https://github.com/Cp0204/quark-auto-save)：夸克分享、转存、任务及云解压接口参考。
+- [AList](https://github.com/AlistGo/alist)：夸克驱动文件移动接口与已有挂载凭据引用。
+- [TMDB](https://developer.themoviedb.org/) / [TVmaze](https://www.tvmaze.com/api)：作品身份、别名、外部 ID 与季集日程。
+- [Infuse Metadata 101](https://support.firecore.com/hc/en-us/articles/215090947-Metadata-101)：影视目录及文件命名参考。
 
-后台执行器在 `src/media_helper/` 中独立实现，只用 Python 标准库，不包含或导入上述项目的代码；它们的源码与镜像仍遵循各自的许可证。
+上述项目与服务分别遵循其许可证及使用条款。
 
-## 免责声明
+## 使用声明与许可证
 
-- 本项目仅供个人学习、研究和整理自有网盘使用，与夸克网盘、阿里巴巴集团、TMDB、TVmaze、Firecore 等服务方均无关联，也未获其认可。
-- 本项目不提供、不存储、不分发任何影视资源。搜索结果来自第三方公开分享，本项目不核实其版权状态；请只保存和使用你有权获取的内容，并遵守所在地法律法规与各服务的用户协议。
-- 本项目通过网盘的非公开接口工作，接口变更可能导致功能失效；自动化操作也可能触发风控或限制账号，使用风险由使用者自行承担。
-- Cookie 和 API 令牌等凭据保存在你自己的设备上，请妥善保管，不要提交到代码仓库或分享给他人。
-- 本软件按“原样”提供，不提供任何明示或暗示的担保；作者不对因使用本软件造成的数据丢失、账号受限或其他损失负责。
+本项目用于个人学习、研究和自有网盘整理，不提供、存储或分发影视资源。搜索结果来自第三方，仅应处理有权获取的内容；本项目与网盘、元数据及播放器服务方无关联，也未获其认可。
 
-## 许可证
-
-[MIT](LICENSE)
+网盘非公开接口可能变更或触发服务限制。凭据应保存在私有目录，不得提交至 Git。软件按“原样”提供，不作任何担保；许可证及责任条款见 [MIT License](LICENSE)。

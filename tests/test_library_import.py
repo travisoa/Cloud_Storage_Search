@@ -147,14 +147,75 @@ class LibraryImportTests(unittest.TestCase):
         self.assertEqual(plan["operations"], [])
         self.assertEqual(sum(item["reason"] == "video_size_unknown_or_zero" for item in plan["review"]), 2)
 
+    def test_scan_root_category_context_reaches_default_resolver(self):
+        from media_helper.library_identity import MediaResolver
+        from tests.test_library_identity import Metadata
+        metadata = Metadata()
+        self.storage.folders['inbox'] = [row('m1', '示例电影.2025.mkv', 'inbox')]
+        snapshot = scan(self.storage, source_id='inbox', excluded_ids=['library'],
+                        source_context={'ancestors': ['电视剧'], 'kind': 'tv'})
+        plan = plan_import(snapshot, library(), MediaResolver(metadata))
+        self.assertEqual(plan['operations'], [])
+        self.assertEqual(plan['review'][0]['reason'], 'explicit_season_and_episode_required')
+        self.assertEqual(metadata.calls, [])
+
+    def test_source_context_is_bound_to_scan_hash_and_legacy_scans_still_work(self):
+        snapshot = scan(self.storage, source_id='0', excluded_ids=['library'],
+                        source_context={'ancestors': [], 'kind': 'tv'})
+        snapshot['source_context']['kind'] = 'movie'
+        with self.assertRaisesRegex(ValueError, 'scan_snapshot_changed'):
+            plan_import(snapshot, library(), resolver)
+        self.assertEqual(self.plan()['status'], 'READY')
+
+    def test_extras_and_iso_are_reviewed_before_metadata_resolution(self):
+        self.storage.folders['inbox'] = [row('trailer', '测试电影.2025.Trailer.mkv', 'inbox'),
+                                         row('iso', '测试电影.2025.iso', 'inbox'),
+                                         row('zip', '测试电影.2025.zip', 'inbox'),
+                                         row('trailers', 'Trailers', 'inbox', directory=True)]
+        self.storage.folders['trailers'] = [row('extra', '测试电影.2025.mkv', 'trailers')]
+        def forbidden(file, context):
+            raise AssertionError('excluded media must not reach resolver')
+        snapshot = scan(self.storage, source_id='0', excluded_ids=['library'])
+        self.assertEqual(next(item for item in snapshot['entries'] if item['fid'] == 'iso')['kind'], 'archive')
+        plan = plan_import(snapshot, library(), forbidden)
+        self.assertEqual(plan['operations'], [])
+        self.assertEqual({item['source']['fid']: item['reason'] for item in plan['review']},
+                         {'trailer': 'extra_or_trailer_not_a_feature', 'extra': 'extra_or_trailer_not_a_feature',
+                          'iso': 'archive_requires_extraction', 'zip': 'archive_requires_extraction'})
+
+    def test_source_root_extras_are_excluded_without_a_movie_size_floor(self):
+        self.storage.folders['inbox'] = [row('m1', '测试电影.2025.mkv', 'inbox', size=1)]
+        snapshot = scan(self.storage, source_id='inbox', excluded_ids=['library'],
+                        source_context={'ancestors': ['Trailers']})
+        plan = plan_import(snapshot, library(), resolver)
+        self.assertEqual(plan['operations'], [])
+        self.assertEqual(plan['review'][0]['reason'], 'extra_or_trailer_not_a_feature')
+        snapshot = scan(self.storage, source_id='inbox', excluded_ids=['library'])
+        plan = plan_import(snapshot, library(), resolver)
+        self.assertEqual(len(plan['operations']), 1)
+        self.assertEqual(plan['operations'][0]['source']['size'], 1)
+
+    def test_extras_words_inside_a_work_title_do_not_hide_its_episodes(self):
+        self.storage.folders['inbox'] = [row('show', '幕后之王 (2019)', 'inbox', directory=True),
+                                         row('t1', 'Extras.S01E02.mkv', 'inbox')]
+        self.storage.folders['show'] = [row('e1', '幕后之王 S01E01.mkv', 'show'),
+                                        row('x1', '幕后之王 花絮01.mp4', 'show'),
+                                        row('extras', 'Extras', 'show', directory=True)]
+        self.storage.folders['extras'] = [row('x2', '幕后之王 S01E01 片段.mkv', 'extras')]
+        snapshot = scan(self.storage, source_id='inbox', excluded_ids=['library'],
+                        source_context={'ancestors': ['影视', '幕后之王 (2019)']})
+        plan = plan_import(snapshot, library(), resolver)
+        extras = {item['source']['fid'] for item in plan['review'] if item['reason'] == 'extra_or_trailer_not_a_feature'}
+        self.assertEqual(extras, {'x1', 'x2'})
+
     def test_plan_uses_identity_and_same_prefix_and_unique_subtitle(self):
         plan = self.plan()
         self.assertEqual(plan["status"], "READY")
         by_id = {op["source"]["fid"]: op for op in plan["operations"]}
         self.assertEqual(by_id["v1"]["target_directories"], ["测试剧 (2026)", "Season 01"])
-        self.assertEqual(by_id["v1"]["target_name"], "测试剧 (2026) S01E01 [2160p].mkv")
-        self.assertEqual(by_id["s1"]["target_name"], "测试剧 (2026) S01E01 [2160p].zh-Hans.srt")
-        self.assertEqual(by_id["m1"]["target_name"], "测试电影 (2025) [1080p].mp4")
+        self.assertEqual(by_id["v1"]["target_name"], "测试剧 (2026)S01E01_2160P.mkv")
+        self.assertEqual(by_id["s1"]["target_name"], "测试剧 (2026)S01E01_2160P.zh-Hans.srt")
+        self.assertEqual(by_id["m1"]["target_name"], "测试电影 (2025)_1080P.mp4")
         self.assertEqual(self.storage.writes, [])
 
     def test_resolver_receives_full_path_and_ancestor_names(self):
@@ -240,7 +301,7 @@ class LibraryImportTests(unittest.TestCase):
         plan = self.plan()
         self.storage.folders["tv"] = [row("show", "测试剧 (2026)", "tv", directory=True)]
         self.storage.folders["show"] = [row("season", "Season 01", "show", directory=True)]
-        self.storage.folders["season"] = [row("old", "测试剧 (2026) S01E01 [2160p].mkv", "season")]
+        self.storage.folders["season"] = [row("old", "测试剧 (2026)S01E01_2160P.mkv", "season")]
         value = self.apply(plan)
         self.assertEqual(value["status"], "NEEDS_INPUT")
         self.assertEqual(self.storage.writes, [])

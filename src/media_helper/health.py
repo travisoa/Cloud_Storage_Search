@@ -11,6 +11,8 @@ import unicodedata
 
 from .catalog import build_episode_inventory, calculate_missing, parse_file
 from .library_import import _error, _id, scan
+from .library_identity import _QUALITY
+from .planner import _SE
 
 
 _YEAR = re.compile(r"(?:\s*\(((?:18|19|2\d)\d{2})\)|\s*（((?:18|19|2\d)\d{2})）|[ ._-]+((?:18|19|2\d)\d{2}))$")
@@ -27,10 +29,12 @@ def _fold(value):
 
 def _prefix(name):
     stem = posixpath.splitext(name)[0]
-    marker = _PAIR.search(stem)
+    markers = [match for pattern in (_PAIR, _SE) if (match := pattern.search(stem))]
+    marker = min(markers, key=lambda match: match.start()) if markers else None
     if marker:
         return stem[:marker.start()].strip(" ._-[({")
-    label = _LABEL.search(stem)
+    labels = [match for pattern in (_LABEL, _QUALITY) if (match := pattern.search(stem))]
+    label = min(labels, key=lambda match: match.start()) if labels else None
     return (stem[:label.start()] if label else stem).strip(" ._-")
 
 
@@ -145,15 +149,20 @@ def inspect(storage, *, library_root_id, categories, resolver=None, metadata=Non
     identity_by_work = defaultdict(dict)
     metadata_ok = snapshot['status'] not in {'NEEDS_AUTH', 'RISK_CONTROL'}
     fatal_metadata = not metadata_ok
+    from .workflow import _TV_CATEGORY_NAMES, _TV_SUBCATEGORY_NAMES, _normal
+    tv_groups = _TV_CATEGORY_NAMES | _TV_SUBCATEGORY_NAMES
     processed = 0
     for row in entries:
         processed += 1
         chain = ancestors(row)
         category_index = next((index for index, value in enumerate(chain) if value["fid"] in category_ids), None)
         category = category_ids[chain[category_index]["fid"]] if category_index is not None else None
-        work = chain[category_index + 1] if category_index is not None and len(chain) > category_index + 1 else None
-        if row["is_dir"] and row["parent_id"] in category_ids:
-            work = row
+        candidates = chain[category_index + 1:] if category_index is not None else []
+        if row["is_dir"] and category_index is not None:
+            candidates = [*candidates, row]
+        # Skip only recognized category layers. Unknown folders retain their
+        # identity and still need the usual title/year and metadata checks.
+        work = next((item for item in candidates if category != "tv" or _normal(item["name"]) not in tv_groups), None)
         work_id = work["fid"] if work else "unclassified:" + row["parent_id"]
         if work:
             work_dirs[work_id] = work

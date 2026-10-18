@@ -85,6 +85,26 @@ class QuarkProviderTests(unittest.TestCase):
         self.assertEqual(transport.calls[0]["payload"], {"pwd_id": "abc123", "passcode": "1234"})
         self.assertEqual(parse_qs(urlsplit(transport.calls[-1]["url"]).query)["pdir_fid"], ["source-dir"])
 
+    def test_share_tree_reuses_token_only_within_one_enumeration(self):
+        from media_helper.workflow import _share_tree
+        root = ok({"list": [file("show", "Show", is_dir=True)]}, total=1)
+        show = ok({"list": [file("quality", "4K", is_dir=True)]}, total=1)
+        quality = ok({"list": [file("episode", share_fid_token="file-token")]}, total=1)
+        provider, transport = self.provider(ok({"stoken": "first-token"}), root, show, quality,
+                                            ok({"stoken": "second-token"}), root, show, quality)
+        hit = {"url": "https://pan.quark.cn/s/abc123", "parent_id": "quality", "path": "Show/4K"}
+        first = _share_tree(provider, hit)
+        second = _share_tree(provider, hit)
+        self.assertEqual(first[0]["share_ref"]["parent_id"], "quality")
+        self.assertEqual(second[0]["file"]["fid"], "episode")
+        token_calls = [call for call in transport.calls if call["method"] == "POST"]
+        self.assertEqual(len(token_calls), 2)
+        detail_calls = [parse_qs(urlsplit(call["url"]).query) for call in transport.calls if call["method"] == "GET"]
+        self.assertEqual([query["pdir_fid"] for query in detail_calls],
+                         [["0"], ["show"], ["quality"], ["0"], ["show"], ["quality"]])
+        self.assertEqual([query["stoken"] for query in detail_calls],
+                         [["first-token"]] * 3 + [["second-token"]] * 3)
+
     def test_save_polls_but_submits_only_one_post_and_returns_real_new_fids(self):
         provider, transport = self.provider(ok({"task_id": "task1"}), ok({"status": 0}),
                                             ok({"status": 2, "save_as": {"save_as_top_fids": ["new1"]}}))

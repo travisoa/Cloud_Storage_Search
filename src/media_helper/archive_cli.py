@@ -65,14 +65,11 @@ def _selected(args, config, root):
         return storage, library["library_root_id"]
     from .headless_cli import _storage
     storage = _storage(config)
-    source = config.get("credential_source", {})
-    if source.get("type") == "alist" and type(source.get("storage_id")) is int:
-        storage.account_scope = "quark:alist-storage:" + str(source["storage_id"])
     return storage, config["library_root_id"]
 
 
-def _job_key(prefix, storage, value):
-    scope = getattr(storage, "account_scope", None)
+def _job_key(prefix, storage, value, *, account_scope=None):
+    scope = account_scope if account_scope is not None else getattr(storage, "account_scope", None)
     if not isinstance(scope, str) or not scope:
         raise ValueError("需要已绑定账号作用域")
     # Root/parent/name/size are immutable journal evidence, not ways to
@@ -82,12 +79,27 @@ def _job_key(prefix, storage, value):
                                                     separators=(",", ":")).encode()).hexdigest()
 
 
+def _legacy_record(prefix, storage, value, journal, job_key):
+    # The archive CLI already used mount scopes for AList before the shared
+    # connection resolver. Only the default file path had the old root scope.
+    if getattr(storage, "credential_source", None) == "alist" or journal.get(job_key) is not None:
+        return None
+    for scope in getattr(storage, "legacy_account_scopes", ()):
+        old_key = _job_key(prefix, storage, value, account_scope=scope)
+        if old_key != job_key and journal.get(old_key) is not None:
+            return {"status": "NEEDS_INPUT", "writes_attempted": False, "writes_performed": False,
+                    "reasons": ["legacy_account_scope_requires_confirmation"], "legacy_job_key": old_key}
+    return None
+
+
 def _extract(storage, root, *, fid, parent_id, library_root, apply, reconcile):
     job_key = _job_key("archive", storage, fid)
     journal = JobJournal(root / "runtime/archive-jobs.sqlite3")
     try:
-        result = extract(storage, fid=fid, parent_id=parent_id, library_root_id=library_root,
-                         journal=journal, job_key=job_key, apply=apply, reconcile=reconcile)
+        result = _legacy_record("archive", storage, fid, journal, job_key)
+        if result is None:
+            result = extract(storage, fid=fid, parent_id=parent_id, library_root_id=library_root,
+                             journal=journal, job_key=job_key, apply=apply, reconcile=reconcile)
     finally:
         journal.close()
     result["job_key"] = job_key
@@ -98,16 +110,24 @@ def _fetch(args, storage, library_root, config, root):
     from .archive_flow import fetch, task_candidate
     from .tasks import TaskStore
     task = TaskStore(root / "runtime/tasks", library_root).load(args.task_id)
-    candidate, source = task_candidate(task, args.candidate_id)
     apply = bool(args.apply and not args.plan and not args.reconcile)
+    from .headless_cli import _task_scope_issue
+    issue = _task_scope_issue(task, config, apply=apply, current_scope=storage.account_scope)
+    if issue:
+        return {**issue, "task_id": args.task_id, "source_task_id": args.task_id,
+                "save_task_id": None, "browser_opened": False}
+    candidate, source = task_candidate(task, args.candidate_id)
     job_key = _job_key("archive-fetch", storage, args.candidate_id)
     journal = JobJournal(root / "runtime/archive-jobs.sqlite3")
     try:
-        result = fetch(storage, candidate=candidate, source=source, library_root_id=library_root,
-                       journal=journal, job_key=job_key, apply=apply, reconcile=args.reconcile)
+        result = _legacy_record("archive-fetch", storage, args.candidate_id, journal, job_key)
+        if result is None:
+            result = fetch(storage, candidate=candidate, source=source, library_root_id=library_root,
+                           journal=journal, job_key=job_key, apply=apply, reconcile=args.reconcile)
     finally:
         journal.close()
-    result.update(job_key=job_key, task_id=args.task_id)
+    result.update(job_key=job_key, source_task_id=args.task_id,
+                  save_task_id=result.get("save_task_id", result.get("task_id")), task_id=args.task_id)
     if result["status"] == "FETCHED":
         staging = result["staging"]["folder_id"]
         result["next_step"] = ("archive extract --fid " + result["archive_fid"] + " --parent-id " + staging)

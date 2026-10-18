@@ -19,11 +19,38 @@ import unicodedata
 from .journal import safe_record
 from .catalog import MetadataError
 from .naming import episode_filename, media_info, movie_filename, series_prefix
-from .planner import SUBTITLE_EXTENSIONS, VIDEO_EXTENSIONS, _subtitle_suffix
+from .planner import SUBTITLE_EXTENSIONS, VIDEO_EXTENSIONS, _SE, _subtitle_suffix
 from .providers import AuthenticationError, RiskControlError
+from .archives import classify_archive
+from .library_identity import _title_year
+from .movie_workflow import _EXTRA
 
 
-_ARCHIVE = re.compile(r"(?:\.(?:zip|rar|7z|tar|gz|bz2|xz)(?:\.\d{3})?|\.part\d+\.rar|\.r\d{2}|\.z\d{2})$", re.I)
+_EXTRA_DIRECTORY = re.compile(r"(?:trailers?|samples?|teasers?|featurettes?)", re.I)
+
+
+def _fold_title(value):
+    return re.sub(r"[._]+", " ", unicodedata.normalize("NFKC", value)).casefold()
+
+
+def _is_extra(path):
+    """Extras words count only outside the work's own title (幕后之王, Extras)."""
+    parts = [part for part in path.split("/") if part]
+    stem = posixpath.splitext(parts[-1])[0] if parts else ""
+    titles = [title for title, year in map(_title_year, [*parts[:-1], stem]) if year and title]
+    marker = _SE.search(stem)
+    if marker:
+        titles.append(stem[:marker.start()].strip(" ._-"))
+    keys = sorted({_fold_title(title) for title in titles if title.strip()}, key=len, reverse=True)
+    for index, part in enumerate(parts):
+        if index < len(parts) - 1 and _EXTRA_DIRECTORY.fullmatch(part):
+            return True
+        text = _fold_title(part)
+        for key in keys:
+            text = text.replace(key, " ")
+        if _EXTRA.search(text):
+            return True
+    return False
 
 
 def _digest(value):
@@ -105,10 +132,26 @@ def _account(storage):
 
 
 def _scan_payload(report):
-    return {key: report[key] for key in ("source_id", "excluded_ids", "entries", "complete", "account_scope_hash")}
+    keys = ("source_id", "excluded_ids", "entries", "complete", "account_scope_hash")
+    payload = {key: report[key] for key in keys}
+    if "source_context" in report:
+        payload["source_context"] = report["source_context"]
+    return payload
 
 
-def scan(storage, *, source_id, excluded_ids=(), max_entries=10000, max_depth=12):
+def _source_context(value):
+    if not isinstance(value, dict) or set(value) - {"ancestors", "kind"}:
+        raise ValueError("invalid_scan_source_context")
+    ancestors = value.get("ancestors", [])
+    if (not isinstance(ancestors, list) or len(ancestors) > 100
+            or any(not isinstance(name, str) or not name or name in {".", ".."} or any(c in name for c in "/\\")
+                   or any(ord(c) < 32 for c in name) for name in ancestors)
+            or value.get("kind") not in {None, "tv", "movie"}):
+        raise ValueError("invalid_scan_source_context")
+    return deepcopy(value)
+
+
+def scan(storage, *, source_id, excluded_ids=(), max_entries=10000, max_depth=12, source_context=None):
     """Inventory a complete bounded tree without changing cloud or journal state."""
     source_id = _id(source_id)
     account = _account(storage)
@@ -124,6 +167,8 @@ def scan(storage, *, source_id, excluded_ids=(), max_entries=10000, max_depth=12
               "excluded_ids": excluded, "entries": [], "directories": [], "errors": [],
               "writes_attempted": False, "writes_performed": False,
               "limits": {"max_entries": max_entries, "max_depth": max_depth}}
+    if source_context is not None:
+        report["source_context"] = _source_context(source_context)
     seen = {source_id}
     queue = deque([(source_id, "", 0)])
     try:
@@ -151,7 +196,7 @@ def scan(storage, *, source_id, excluded_ids=(), max_entries=10000, max_depth=12
                     queue.append((row["fid"], row["path"], depth + 1))
                 else:
                     extension = posixpath.splitext(row["name"])[1].casefold()
-                    row["kind"] = ("archive" if _ARCHIVE.search(row["name"]) else
+                    row["kind"] = ("archive" if classify_archive(row["name"]) else
                                    "video" if extension in VIDEO_EXTENSIONS else
                                    "subtitle" if extension in SUBTITLE_EXTENSIONS else "unmatched")
                 report["entries"].append(row)
@@ -199,7 +244,7 @@ def _plan_payload(report):
     return {key: report[key] for key in ("version", "scan", "library", "operations", "review")}
 
 
-def plan_import(scan_report, library, resolver):
+def plan_import(scan_report, library, resolver, *, source_context=None):
     """Propose only uniquely resolved files; archives and ambiguity stay in place."""
     snapshot = deepcopy(scan_report)
     if not snapshot.get("complete") or snapshot.get("status") != "COMPLETE":
@@ -207,6 +252,12 @@ def plan_import(scan_report, library, resolver):
                 "errors": [{"reason": "complete_scan_required"}], "writes_performed": False}
     if snapshot.get("snapshot_hash") != _digest(_scan_payload(snapshot)):
         raise ValueError("scan_snapshot_changed")
+    if source_context is not None:
+        context = _source_context(source_context)
+        if "source_context" in snapshot and snapshot["source_context"] != context:
+            raise ValueError("scan_source_context_mismatch")
+        snapshot["source_context"] = context
+        snapshot["snapshot_hash"] = _digest(_scan_payload(snapshot))
     root = _id(library.get("library_root_id"))
     if library.get("account_scope_hash", snapshot["account_scope_hash"]) != snapshot["account_scope_hash"]:
         raise ValueError("library_account_scope_mismatch")
@@ -232,13 +283,18 @@ def plan_import(scan_report, library, resolver):
               "library": normalized_library, "operations": [], "review": [],
               "writes_attempted": False, "writes_performed": False}
     by_fid = {row["fid"]: row for row in snapshot["entries"]}
+    source_context = snapshot.get("source_context", {})
     videos = []
     for row in snapshot["entries"]:
         if row["is_dir"] or row["kind"] == "subtitle":
             continue
-        if row["kind"] != "video":
+        if row["kind"] != "video" or classify_archive(row["name"]):
             report["review"].append({"source": deepcopy(row), "reason":
-                                     "archive_requires_extraction" if row["kind"] == "archive" else "unsupported_file"})
+                                     "archive_requires_extraction" if row["kind"] == "archive" or classify_archive(row["name"]) else "unsupported_file"})
+            continue
+        path = posixpath.join(*source_context.get("ancestors", []), row["path"])
+        if _is_extra(path):
+            report["review"].append({"source": deepcopy(row), "reason": "extra_or_trailer_not_a_feature"})
             continue
         if type(row["size"]) is not int or row["size"] <= 0:
             report["review"].append({"source": deepcopy(row), "reason": "video_size_unknown_or_zero"})
@@ -246,11 +302,14 @@ def plan_import(scan_report, library, resolver):
         try:
             context = {"source_id": snapshot["source_id"],
                        "path": row["path"],
-                       "ancestors": row["parent_path"].split("/") if row["parent_path"] else [],
+                       "ancestors": [*source_context.get("ancestors", []),
+                                     *(row["parent_path"].split("/") if row["parent_path"] else [])],
                        "parent_path": row["parent_path"]}
+            if source_context.get("kind"):
+                context["kind"] = source_context["kind"]
             if any(re.fullmatch(r"(?:Season[ ._-]*\d+|第\s*\d+\s*季)", part, re.I)
                    for part in context["ancestors"]):
-                context["kind"] = "tv"
+                context.setdefault("kind", "tv")
             resolved = resolver(deepcopy(row), context)
             if isinstance(resolved, dict) and resolved.get("status") == "NEEDS_INPUT":
                 reason = resolved.get("reason")

@@ -112,7 +112,7 @@ def assess(policy, info, *, size, name='', path=''):
     codecs = selected['preferred_codecs']
     if selected['require_codec'] and codec not in codecs:
         reasons.append('required_codec_unverified_or_not_allowed')
-    if selected['hdr'] == 'exclude' and hdr is not None:
+    if selected['hdr'] == 'exclude' and hdr in HDR:
         reasons.append('hdr_label_excluded')
     if selected['hdr'] == 'require' and hdr not in HDR:
         reasons.append('required_hdr_unverified')

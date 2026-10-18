@@ -180,13 +180,25 @@ class AListCredentials:
     def __repr__(self):
         return "<AListCredentials in_memory=True secret_output=False>"
 
-    def _read(self, path):
+    def _read(self, path, *, missing_ok=False):
         try:
             result = self._runner(["container", "exec", CONTAINER_NAME, "cat", path],
                                   capture_output=True, check=False, timeout=self._timeout,
                                   stdin=subprocess.DEVNULL, shell=False)
         except Exception:
             raise AListCredentialError("Read-only access to the existing AList database was not available") from None
+        # cat reports ENOENT without exposing file contents. Accept only its
+        # exact known missing-file diagnostics for the optional fixed WAL;
+        # permissions, container failures and unknown/localized errors fail closed.
+        missing_errors = {
+            ("cat: " + path + ": No such file or directory\n").encode(),
+            ("cat: can't open '" + path + "': No such file or directory\n").encode(),
+        }
+        if (missing_ok and path == DATABASE_PATH + "-wal"
+                and getattr(result, "returncode", None) == 1
+                and getattr(result, "stdout", None) == b""
+                and getattr(result, "stderr", None) in missing_errors):
+            return b""
         if (getattr(result, "returncode", None) != 0
                 or not isinstance(getattr(result, "stdout", None), bytes)):
             raise AListCredentialError("Read-only access to the existing AList database files failed")
@@ -196,7 +208,7 @@ class AListCredentials:
         return content
 
     def _read_pair(self):
-        return self._read(DATABASE_PATH), self._read(DATABASE_PATH + "-wal")
+        return self._read(DATABASE_PATH), self._read(DATABASE_PATH + "-wal", missing_ok=True)
 
     def _stable_snapshot(self):
         previous = self._read_pair()

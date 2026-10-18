@@ -114,7 +114,9 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
     for transient in ('source_selection', 'source_episode_mapping', '_naming_prefix'):
         request.pop(transient, None)
     store = TaskStore(root / 'runtime/tasks', config['library_root_id'])
-    task = store.create(request, apply_authorized=bool(apply and subscription['auto_save']))
+    from .storage_connection import account_scope
+    task = store.create(request, apply_authorized=bool(apply and subscription['auto_save']),
+                        account_scope=account_scope(config))
     journal = None
     update_report = None
     preferred = subscription.get('preferred_sources', [])
@@ -174,6 +176,10 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
                     return finish(pre)
                 if _new_files(pre):
                     return finish({**pre, 'new_files': _new_files(pre), 'source_strategy': 'reconciled_submission'})
+                # Recovery of an empty/ready intent did not inspect this
+                # cycle's missing episodes. Apply the subscription policy to
+                # a fresh read-only plan before allowing any new save.
+                pre = workflow.run(request, storage, metadata, search, journal, apply=False)
             else:
                 return finish(checked)
         if pre['status'] in {'NEEDS_AUTH', 'RISK_CONTROL', 'UNKNOWN', 'FAILED', 'PARTIAL'}:

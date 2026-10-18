@@ -4,7 +4,7 @@ import json
 import unittest
 
 from media_helper.search import PreferredSourceSearch, SearchError
-from media_helper.sources import extract_selected_sources, safe_source, source_ref
+from media_helper.sources import extract_selected_sources, safe_source, source_digest, source_ref
 from media_helper.workflow import _digest
 
 
@@ -24,6 +24,14 @@ class Search:
 
 
 class SourceReferences(unittest.TestCase):
+    def test_audit_digest_excludes_password_query_fragment_and_userinfo(self):
+        self.assertEqual(source_digest(URL), _digest(URL))
+        for url in (URL + "?pwd=1234", URL + "?pwd=9876&tracking=x", URL + "#1234",
+                    URL.replace("pan.quark.cn", "user:secret@pan.quark.cn")):
+            with self.subTest(url=url):
+                self.assertEqual(source_digest(url), _digest(URL))
+                self.assertNotEqual(source_digest(url), _digest(url))
+
     def test_safe_reference_preserves_only_reusable_fields_and_existing_hash(self):
         value = safe_source({"url": URL, "title": "测试剧 4K", "source": "pansou", "verified": False,
                              "parent_id": "a57f2192a111444da0c1eccf4d629433", "path": "测试剧/4K",

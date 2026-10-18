@@ -106,6 +106,7 @@ class FetchTests(unittest.TestCase):
     def test_apply_saves_once_into_new_staging_and_verifies_new_fid(self):
         report = self.fetch(apply=True)
         self.assertEqual(report["status"], "FETCHED", report)
+        self.assertEqual(report["save_task_id"], "t1")
         self.assertEqual(report["archive_fid"], "saved-arc")
         self.assertEqual(self.storage.saves, [["arc"]])
         again = self.fetch(apply=True)
@@ -164,12 +165,12 @@ class OutputPlanTests(unittest.TestCase):
         plan = plan_import(snapshot, library, resolver)
         self.assertEqual(plan["status"], "READY", plan)
         self.assertEqual([op["target_name"] for op in plan["operations"]],
-                         ["沙丘2 (2024) [2160p].mkv", "沙丘2 (2024) [2160p].zh.srt"])
+                         ["沙丘2 (2024)_2160P.mkv", "沙丘2 (2024)_2160P.zh.srt"])
         result = apply_import(plan, storage, journal=journal, job_key="archive-import-test", apply=True)
         self.assertEqual(result["status"], "COMPLETE", result)
         movie_dir = next(item for item in storage.folders["movies"] if item["name"] == "沙丘2 (2024)")
         self.assertEqual(sorted(item["name"] for item in storage.folders[movie_dir["fid"]]),
-                         ["沙丘2 (2024) [2160p].mkv", "沙丘2 (2024) [2160p].zh.srt"])
+                         ["沙丘2 (2024)_2160P.mkv", "沙丘2 (2024)_2160P.zh.srt"])
 
     def test_unfinished_extraction_cannot_be_planned(self):
         journal = Journal()

@@ -83,12 +83,15 @@ def _receipt_media(plan_row):
         return media_info(plan_row["source"]["name"])
     if not isinstance(supplied, dict) or supplied.get("inspection") != "release_labels_only":
         raise _ValidationError("media_labels_require_recorded_provenance")
-    for field in ("resolution", "codec", "hdr"):
+    recorded_contexts = set()
+    for field in ("resolution", "codec", "hdr", "audio"):
         value = supplied.get(field)
         if value is None:
             continue
         evidence = supplied.get("evidence" if field == "resolution" else field + "_evidence", [])
         basis = supplied.get("basis" if field == "resolution" else field + "_basis")
+        if not isinstance(evidence, list):
+            raise _ValidationError("media_labels_require_recorded_provenance")
         valid = False
         for item in evidence:
             if (not isinstance(item, dict) or item.get("source") not in {"filename", "parent_directory"}
@@ -100,9 +103,26 @@ def _receipt_media(plan_row):
             checked = media_info(item["text"])
             if checked.get(field) == value and item.get("value") == value and basis == item["source"]:
                 valid = True
+                if item["source"] == "parent_directory":
+                    recorded_contexts.add(item["text"])
         if not valid:
             raise _ValidationError("media_labels_require_recorded_provenance")
-    return deepcopy(supplied)
+    result = deepcopy(supplied)
+    if "audio" not in supplied:
+        # Older receipts predate audio labels. Their source filename is still
+        # recorded, while directory text is usable only when it substantiates
+        # an already validated label. Never invent a directory from preferences.
+        parsed = media_info(plan_row["source"]["name"])
+        if parsed.get("audio_basis") == "unknown":
+            candidates = [media_info("", text) for text in sorted(recorded_contexts)]
+            labelled = [item for item in candidates if item.get("audio_basis") != "unknown"]
+            values = {item.get("audio") for item in labelled}
+            if len(values) == 1 and None not in values:
+                parsed = labelled[0]
+        for field in ("audio", "audio_basis", "audio_evidence"):
+            if field in parsed:
+                result[field] = deepcopy(parsed[field])
+    return result
 
 
 def _make_plan(request, receipt, base_rows, receipt_rows, prefix, destination):

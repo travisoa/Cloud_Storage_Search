@@ -85,6 +85,63 @@ class HealthTests(unittest.TestCase):
         self.assertFalse(report['playability_verified'])
         self.assertEqual(self.storage.rows, before)
 
+    def test_tv_region_layers_keep_work_inventory_and_metadata_separate(self):
+        self.storage.rows['tv'] = [folder('kr', '韩剧', 'tv')]
+        self.storage.rows['kr'] = [folder('a', '甲剧 (2026)', 'kr'), folder('b', '乙剧 (2026)', 'kr')]
+        self.storage.rows['a'] = [file('ae', '甲剧 (2026)S01E01.mkv', 'a')]
+        self.storage.rows['b'] = [file('be', '乙剧 (2026)S01E01.mkv', 'b')]
+
+        class PerWorkResolver(Resolver):
+            def __call__(self, row, context):
+                title, identifier = ('甲剧', '1') if row['fid'] == 'ae' else ('乙剧', '2')
+                return {**self.result, 'title': title, 'series_id': identifier}
+
+        report = self.inspect(resolver=PerWorkResolver())
+        self.assertEqual(report['status'], 'HEALTHY', report)
+        self.assertEqual(report['coverage']['work_directories'], 2)
+        self.assertEqual({item['work_id'] for item in report['expected_schedule']['seasons']}, {'a', 'b'})
+
+    def test_region_group_does_not_hide_empty_work_or_orphan_subtitle(self):
+        self.storage.rows['tv'] = [folder('kr', '韩剧', 'tv')]
+        self.storage.rows['kr'] = [folder('a', '甲剧 (2026)', 'kr'), folder('b', '乙剧 (2026)', 'kr')]
+        self.storage.rows['a'] = [file('asub', '甲剧 (2026)S01E01.zh.srt', 'a')]
+        self.storage.rows['b'] = [file('be', '乙剧 (2026)S01E01.mkv', 'b')]
+        report = self.inspect()
+        findings = {(item['code'], item['path']) for item in report['findings']}
+        self.assertIn(('empty_work_directory', '电视剧/韩剧/甲剧 (2026)'), findings)
+        self.assertIn(('orphan_subtitle', '电视剧/韩剧/甲剧 (2026)/甲剧 (2026)S01E01.zh.srt'), findings)
+        self.assertNotIn('duplicate_episode_versions', self.codes(report))
+
+    def test_unknown_group_name_is_not_assumed_to_be_a_category(self):
+        self.storage.rows['tv'] = [folder('group', '自定义合集', 'tv')]
+        self.storage.rows['group'] = [folder('show', '示例 (2026)', 'group')]
+        report = self.inspect()
+        self.assertEqual(report['coverage']['work_directories'], 1)
+        self.assertIn('work_year_unrecognized', self.codes(report))
+
+    def test_compact_episode_names_keep_prefix_and_inventory_alignment(self):
+        for title in ('ExampleShow (2026)', 'ExampleShow'):
+            with self.subTest(title=title):
+                self.storage.rows['tv'][0]['name'] = title
+                self.storage.rows['season'][0]['name'] = title + 'S01E01_2160P_DV_DDP5.1.mkv'
+                before = deepcopy(self.storage.rows)
+                report = self.inspect()
+                self.assertNotIn('title_prefix_mismatch', self.codes(report))
+                self.assertNotIn('episode_unrecognized', self.codes(report))
+                self.assertEqual(report['coverage']['video_files'], 1)
+                self.assertEqual(self.storage.rows, before)
+
+    def test_audio_only_movie_suffix_keeps_matching_work_prefix(self):
+        self.storage.rows['movie'] = [folder('feature', 'Example Movie (2025)', 'movie')]
+        for suffix in ('DDP5.1', 'TrueHD7.1.Atmos'):
+            with self.subTest(suffix=suffix):
+                self.storage.rows['feature'] = [file('feature-file', f'Example Movie (2025)_{suffix}.mkv', 'feature')]
+                before = deepcopy(self.storage.rows)
+                report = self.inspect()
+                self.assertEqual(report['status'], 'HEALTHY', report)
+                self.assertEqual(report['findings'], [])
+                self.assertEqual(self.storage.rows, before)
+
     def test_same_season_episode_versions_are_detected_without_content_claim(self):
         self.storage.rows['season'].append(file('e1b', '示例 (2026) S01E01 [1080p].mkv', 'season'))
         report = self.inspect()

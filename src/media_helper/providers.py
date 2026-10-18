@@ -71,6 +71,7 @@ class StorageProvider(Protocol):
     def rename(self, fid: str, name: str) -> dict: ...
     def move(self, fid: str, parent_id: str) -> dict: ...
     def file_info(self, fid: str, parent_id: str | None = None) -> dict: ...
+    def trash(self, fid: str) -> dict: ...
     def extract_archive(self, fid: str, target_parent_id: str, *,
                         on_submitted: Callable[[dict], None] | None = None) -> dict: ...
     def archive_task_status(self, task_id: str) -> dict: ...
@@ -147,7 +148,7 @@ class QuarkProvider:
                   "(KHTML, like Gecko) quark-cloud-drive/3.14.2 Chrome/112.0.5615.165 "
                   "Electron/24.1.3.8 Safari/537.36 Channel/pckk_other_ch")
     capabilities = {"list": True, "share_list": True, "save": True, "mkdir": True,
-                    "rename": True, "file_info": True, "task_status": True,
+                    "rename": True, "file_info": True, "task_status": True, "trash": True,
                     "save_submission_callback": True,
                     "archive_extract": True, "archive_submission_callback": True,
                     "move": True, "delete": False, "cross_provider_move": False}
@@ -369,6 +370,23 @@ class QuarkProvider:
         stoken = data.get("stoken") if isinstance(data, dict) else None
         if not isinstance(stoken, str) or not stoken:
             raise ProviderError("Quark share token was not returned", step="share_files")
+        return self.share_directory({"provider": "quark", "share_id": share_id, "pwd_id": share_id,
+                                     "stoken": stoken}, parent_id)
+
+    def share_directory(self, share_ref: dict, parent_id: str = "0") -> dict:
+        """List another directory with a token held by the current traversal.
+
+        No token is cached on the provider or refreshed automatically. An
+        expired token stops this enumeration through the usual provider error.
+        """
+        step = "share_files"
+        if not isinstance(share_ref, dict) or share_ref.get("provider") not in {None, "quark"}:
+            raise ProviderError("Invalid Quark share reference", step=step)
+        share_id = _identifier(share_ref.get("share_id", share_ref.get("pwd_id")), step)
+        parent_id = _identifier(parent_id, step)
+        stoken = share_ref.get("stoken")
+        if not isinstance(stoken, str) or not stoken:
+            raise ProviderError("Select a valid share reference", step=step)
         files = self._list_pages("/1/clouddrive/share/sharepage/detail", parent_id, share=True,
                                  query={"pwd_id": share_id, "stoken": stoken, "force": "0", "_fetch_banner": "0", "_fetch_share": "1"})
         return {"share_ref": {"provider": "quark", "share_id": share_id, "pwd_id": share_id,
@@ -608,6 +626,27 @@ class QuarkProvider:
             except ProviderError:
                 raise UnknownOutcome("Move returned an invalid task identifier; verify the original file by fid",
                                      step="move", evidence=result) from None
+        return result
+
+    def trash(self, fid: str) -> dict:
+        """Move one file to the Quark recycle bin (recoverable); never empties it.
+
+        Evidence: vendor/qasx delete() uses this endpoint; permanent removal is
+        the separate recycle/remove endpoint, which this project never calls.
+        Callers verify the fid is gone from its parent listing.
+        """
+        fid = _identifier(fid, "trash")
+        response = self._request("POST", "/1/clouddrive/file/delete", payload={
+            "action_type": 2, "filelist": [fid], "exclude_fids": []},
+            step="trash", mutation=True, evidence={"fid": fid})
+        result = {"fid": fid, "status": "submitted"}
+        data = response.get("data")
+        if isinstance(data, dict) and data.get("task_id") is not None:
+            try:
+                result["task_id"] = _identifier(data["task_id"], "trash")
+            except ProviderError:
+                raise UnknownOutcome("Recycle request returned an invalid task identifier; verify by listing",
+                                     step="trash", evidence=result) from None
         return result
 
     def file_info(self, fid: str, parent_id: str | None = None) -> dict:

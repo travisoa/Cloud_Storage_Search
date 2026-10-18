@@ -16,6 +16,10 @@ def run_task(task_id, apply=False, config=None):
         task = store.load(task_id)
         journal = None
         try:
+            from .headless_cli import _task_scope_issue
+            issue = _task_scope_issue(task, config, apply=apply)
+            if issue:
+                return issue
             resolved, issue, metadata, _ = _prepare_identity(task["resolved_request"], config)
             if issue:
                 return store.finish(task, issue)

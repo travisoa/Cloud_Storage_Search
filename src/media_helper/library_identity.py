@@ -12,14 +12,15 @@ import re
 import unicodedata
 
 from .catalog import MetadataError, parse_file
+from .planner import _SE as _PAIR
 
 
-_PAIR = re.compile(r"(?<![A-Za-z0-9])S\d{1,2}[ ._-]*E\d{1,3}(?!\d)", re.I)
 _CN_PAIR = re.compile(r"第\s*[零〇一二两三四五六七八九十百\d]+\s*季.*?第\s*[零〇一二两三四五六七八九十百\d]+\s*集")
 _ANY_EPISODE = re.compile(r"(?<![A-Za-z0-9])(?:S\d{1,2}|EP?\d{1,3})(?!\d)|第.+?[季集]", re.I)
 _YEAR = re.compile(r"(?<!\d)((?:18|19|2\d)\d{2})(?!\d)")
 _SEASON_FOLDER = re.compile(r"(?:Season[ ._-]*(\d{1,2})|第\s*(\d{1,2})\s*季)", re.I)
-_QUALITY = re.compile(r"(?<![A-Za-z0-9])(?:\d{3,4}p|[248]k|uhd|hevc|avc|[hx][ ._-]?26[45]|av1|hdr(?:10\+?)?|dovi|dolby[ ._-]*vision|blu[ ._-]*ray|web[ ._-]*(?:dl|rip)|hdtv|remux)(?![A-Za-z0-9])", re.I)
+_QUALITY = re.compile(r"(?<![A-Za-z0-9])(?:\d{3,4}p|[248]k|uhd|hevc|avc|[hx][ ._-]?26[45]|av1|hdr(?:10\+?)?|dovi|dolby[ ._-]*vision|blu[ ._-]*ray|web[ ._-]*(?:dl|rip)|hdtv|remux)(?![A-Za-z0-9])"
+                      r"|_(?:DV|SDR|HLG|Atmos|(?:DDP|AC3|TrueHD|DTS(?:-HD(?:\.(?:MA|HRA))?|-X)?|AAC|FLAC|Opus|MP3|L?PCM)(?:[1-9]\.[01](?:\.[2-9])?|[1-9][0-9]?ch)?(?:\.Atmos)?)(?=$|[ ._\-])", re.I)
 _GENERIC = {"电影", "电视剧", "剧集", "影库", "movies", "movie", "tv", "tvshows", "television", "videos", "video", "4k", "1080p", "2160p"}
 
 
@@ -105,10 +106,14 @@ def _hints(file, context):
             return None, "filename_and_directory_year_conflict"
         if not year and same:
             year = same[0][1]
-    if not year or not title or title.isdecimal() and len(title) < 4:
+    if not year or not title:
         return None, "title_and_release_year_required"
-    if not pair and (context.get("kind") == "tv" or any(_normal(folder) in {"电视剧", "剧集", "tv", "tvshows", "television"} for folder in folders)):
+    from .workflow import _TV_CATEGORY_NAMES, _TV_SUBCATEGORY_NAMES, _normal as category_name
+    tv_folders = _TV_CATEGORY_NAMES | _TV_SUBCATEGORY_NAMES | {"television"}
+    if not pair and (context.get("kind") == "tv" or any(category_name(folder) in tv_folders for folder in folders)):
         return None, "explicit_season_and_episode_required"
+    if pair and context.get("kind") == "movie":
+        return None, "filename_and_directory_kind_conflict"
     return {"kind": "tv" if pair else "movie", "title": title, "year": year,
             "season": parsed.get("season") if pair else None, "episode": parsed.get("episode") if pair else None}, None
 

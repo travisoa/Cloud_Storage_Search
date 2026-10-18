@@ -16,6 +16,38 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def _save_intent(outside):
+    """Only affirmative actions authorize writes; mentions of actions do not."""
+    text = unicodedata.normalize("NFKC", outside)
+    action = r"(?:转存|保存|存到|补齐)"
+    # A negated request for a plan is not a prohibition on the following save.
+    text = re.sub(r"(?:不要|不用|无需|不需要|不必)\s*(?:生成|给我|做)?\s*计划", "", text)
+    # A single 不/别/勿 negates only when it governs the action, so titles such
+    # as 不良人 or 特别行动 are not read as prohibitions.
+    if re.search(r"(?:(?:不要|不能|不可|不许|禁止|暂不|不必|无需|不用|不需要|不想|不打算|未授权|没有要求)[^，,。；;！？!?\n]*"
+                 r"|[不别勿]\s*(?:再|先)?\s*(?:[把给帮替为][^，,。；;！？!?\n]*)?)" + action, text):
+        return False
+    if re.search(r"只查询|仅查询|只查|仅查|只看|仅看|只搜索|只搜|先查|先看|预览|暂不", text):
+        return False
+    # An affirmative '按计划转存' remains valid; asking to inspect a plan does not.
+    text = re.sub(r"(?:按|按照|依照)(?:上次|之前|已确认|原定|这个|该)?(?:的)?计划", "", text)
+    if "计划" in text:
+        return False
+    for clause in re.split(r"[，,。；;！？!?\n]", text):
+        if re.search(r"是否|有没有|有无|能否|可否|为什么|如何|怎么|怎样|什么|哪里|哪儿|何时|多少|吗|么|知道|询问|(?:已|曾经).*" + action + r"|" + action + r".*(?:过|没有)", clause):
+            continue
+        if re.search(action + r"\s*(?:的)?\s*(?:记录|状态|情况|进度|结果|历史|位置|路径|日志|方法|教程|失败|成功|完成|好了|了)", clause):
+            continue
+        if re.search(r"查询|查一下|查下|查看|看看|看下|查找|搜索|搜一下", clause):
+            if re.search(r"记录|状态|情况|进度|结果|历史|位置|路径|日志|方法|教程|原因", clause):
+                continue
+            if not re.search(r"(?:并|然后|再|直接|立即|马上|现在|顺便)\s*" + action + r"|(?:转存|保存|存)到", clause):
+                continue
+        if re.search(action, clause):
+            return True
+    return False
+
+
 def parse_request(text):
     if not isinstance(text, str) or not text.strip():
         raise ValueError("请提供剧名")
@@ -47,9 +79,8 @@ def parse_request(text):
     title = title.strip(" ._-()（）")
     if not title or len(title) > 160 or "/" in title or "\\" in title:
         raise ValueError("无法从请求确定剧名，请明确作品名称")
-    readonly = bool(re.search(r"只查询|仅查询|只查|仅查|先查|先看|预览|计划|暂不|不要|别转存|别保存|不转存|不保存|不补齐|不追更", outside))
     result = {"title": title, "request_text": text,
-              "save_requested": not readonly and bool(re.search(r"转存|保存|存到|补齐|追更", outside))}
+              "save_requested": _save_intent(outside)}
     # Only the words outside the quoted title decide the media type.
     if re.search(r"电影|影片|(?<![a-z])movie(?![a-z])", outside, re.I) and not re.search(r"电视剧|剧集|追更|第\s*\d+\s*季", outside):
         result["kind"] = "movie"
@@ -104,28 +135,13 @@ def _configured(name, env):
 
 
 def _quark_ready(config):
-    source = config.get("credential_source", {})
-    return bool(source.get("type") == "alist" and source.get("storage_id") is not None) or _configured("quark.json", "QUARK_COOKIE")
+    from .storage_connection import ready
+    return ready(config)
 
 
 def _storage(config):
-    from .providers import QuarkProvider
-    source = config.get("credential_source", {})
-    if source.get("type") == "alist":
-        from .alist_credentials import AListCredentials
-        with AListCredentials() as reader:
-            cookie = reader.load_cookie(source["storage_id"])
-        storage = QuarkProvider(cookie=cookie)
-        storage.credential_source = "alist"
-        storage.account_scope = "quark-root:" + str(config["library_root_id"])
-        return storage
-    if os.environ.get("QUARK_COOKIE"):
-        storage = QuarkProvider()
-    else:
-        from .credentials import read_secret
-        storage = QuarkProvider(cookie=read_secret("quark.json").get("cookie"))
-    storage.account_scope = "quark-root:" + str(config["library_root_id"])
-    return storage
+    from .storage_connection import storage
+    return storage(config)
 
 
 def _metadata(source):
@@ -346,11 +362,28 @@ def _safe_failure(exc):
     from .providers import ProviderError
     from .catalog import MetadataError
     safe = isinstance(exc, (ProviderError, MetadataError, ValueError, RuntimeError)) and not isinstance(exc, OSError)
-    return {"status": "FAILED", "reason": str(exc) if safe else "后台任务未完成，请检查本机配置和运行记录",
+    return {"status": "FAILED", "reason": str(exc) if safe else "任务未完成，请检查本机配置和运行记录",
             "error_type": type(exc).__name__, "browser_opened": False}
 
 
+def _task_scope_issue(task, config, *, apply=False, current_scope=None):
+    from .storage_connection import account_scope
+    bound = task.get("account_scope")
+    current_scope = account_scope(config) if current_scope is None else current_scope
+    blocked = {"status": "NEEDS_INPUT", "task_id": task.get("task_id"), "browser_opened": False,
+               "writes_attempted": False, "writes_performed": False}
+    if bound is not None and bound != current_scope:
+        return {**blocked, "reason": "task_account_scope_changed"}
+    if bound is None and apply:
+        return {**blocked, "reason": "legacy_task_account_scope_unbound",
+                "hint": "先用 replan TASK_ID 生成只读新计划；旧写入记录仍须按原账号核对，不自动迁移。"}
+    return None
+
+
 def _execute_task(task, store, config, *, apply=False, reconcile_only=False, remember_quality=False):
+    issue = _task_scope_issue(task, config, apply=apply)
+    if issue:
+        return issue
     if task["resolved_request"].get("kind") == "movie":
         return _execute_movie(task, store, config, apply=apply, reconcile_only=reconcile_only)
     from .journal import JobJournal
@@ -402,8 +435,23 @@ def _run(request, apply=False, config=None):
     config = _config() if config is None else config
     with run_lock(ROOT / "runtime/workflow.lock"):
         store = TaskStore(ROOT / "runtime/tasks", config["library_root_id"])
-        task = store.create(request, apply_authorized=apply)
+        from .storage_connection import account_scope
+        task = store.create(request, apply_authorized=apply, account_scope=account_scope(config))
         return _execute_task(task, store, config, apply=apply)
+
+
+def _adopt_scope(legacy_key, config, *, apply=False):
+    from .journal import JobJournal, run_lock
+    from .scope_adoption import adopt
+    with run_lock(ROOT / "runtime/workflow.lock"):
+        if not _quark_ready(config):
+            return {"status": "NEEDS_AUTH", "reason": "尚未配置可用夸克凭据", "browser_opened": False}
+        storage = _storage(config)
+        journal = JobJournal(ROOT / "runtime/jobs.sqlite")
+        try:
+            return {**adopt(storage, journal, legacy_key, apply=apply), "browser_opened": False}
+        finally:
+            journal.close()
 
 
 def _task_command(args, config=None):
@@ -415,6 +463,17 @@ def _task_command(args, config=None):
         task = store.load(args.task_id)
         if args.command == "status":
             return {"status": "TASK_STATUS", "task_id": task["task_id"], "task": task, "browser_opened": False}
+        issue = _task_scope_issue(task, config, apply=getattr(args, "apply", False))
+        if issue:
+            return issue
+        if args.command == "replan":
+            from .tasks import replan_request
+            from .storage_connection import account_scope
+            previous_id = task["task_id"]
+            task = store.create(replan_request(task), account_scope=account_scope(config))
+            task["supersedes_task_id"] = previous_id
+            store.save(task)
+            return _execute_task(task, store, config)
         if args.command == "reconcile":
             return _execute_task(task, store, config, reconcile_only=True)
         if args.command == "resume":
@@ -441,7 +500,7 @@ def _task_command(args, config=None):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="后台影库助手：已有集数→预计播出→缺集→搜索→转存→命名，不打开网页")
+    parser = argparse.ArgumentParser(description="网盘影库助手：库存核对、缺集搜索、转存与命名")
     commands = parser.add_subparsers(dest="command", required=True)
     from .watch_cli import add_parser
     add_parser(commands)
@@ -476,9 +535,10 @@ def main(argv=None):
     bind.add_argument("--alias", action="append", default=[])
     bind.add_argument("--evidence-url", action="append", required=True)
     bind.add_argument("--quality-preference", action="append", default=[])
-    for command in ("status", "reconcile", "resume"):
+    for command in ("status", "reconcile", "resume", "replan"):
         help_text = {"status": "read a local task", "reconcile": "reconcile a task using read-only cloud calls",
-                     "resume": "continue the same task; cloud writes require --apply"}[command]
+                     "resume": "continue the same task; cloud writes require --apply",
+                     "replan": "create a fresh read-only plan with current dates and no old candidate decisions"}[command]
         command_parser = commands.add_parser(command, help=help_text)
         command_parser.add_argument("task_id")
         command_parser.add_argument('--library-id', help='use this initialized library without changing the default')
@@ -496,6 +556,10 @@ def main(argv=None):
     normalize_saved.add_argument("task_id")
     normalize_saved.add_argument('--library-id')
     normalize_saved.add_argument("--apply", action="store_true", help="authorize renaming verified new files; omitted means read-only planning")
+    adopt = commands.add_parser("adopt-scope", help="check a completed pre-scope job record against the current connection's files")
+    adopt.add_argument("legacy_job_key")
+    adopt.add_argument('--library-id')
+    adopt.add_argument("--apply", action="store_true", help="copy the checked record to the current scope in the local journal; never writes to the cloud")
     sync = commands.add_parser("sync", help="plan or execute a confirmed series request")
     sync.add_argument("--title", required=True)
     sync.add_argument("--year", type=int)
@@ -505,6 +569,12 @@ def main(argv=None):
     sync.add_argument("--target-folder-id")
     sync.add_argument("--category-folder-id")
     sync.add_argument("--library-root-is-series-category", action="store_true", default=None)
+    sync.add_argument("--replace-episode", action="append", dest="replace_episodes",
+                      help="explicitly re-select a resolution-labelled version for this existing episode (e.g. S01E02); "
+                           "selection follows the work's version policy or library preset, not a comparison with the old file")
+    sync.add_argument("--remove-replaced", action="store_true", default=None,
+                      help="after the new version is verified, move the replaced old file to the recycle bin")
+    sync.add_argument("--plan", action="store_true", help="read and plan only, even with --apply")
     sync.add_argument("--apply", action="store_true", help="execute the saving/renaming request authorized by the user")
     natural = commands.add_parser("request", help="run a conversational title request")
     natural.add_argument("text")
@@ -590,7 +660,13 @@ def main(argv=None):
                 result = run_task(args.task_id, apply=args.apply, config=selected)
             else:
                 result = run_task(args.task_id, apply=args.apply)
-        elif args.command in {"status", "confirm", "reconcile", "resume"}:
+        elif args.command == "adopt-scope":
+            config = _config()
+            if args.library_id:
+                from .library_registry import LibraryRegistry
+                config = LibraryRegistry(ROOT / 'runtime/libraries.json').config_for(args.library_id, config)
+            result = _adopt_scope(args.legacy_job_key, config, apply=args.apply)
+        elif args.command in {"status", "confirm", "reconcile", "resume", "replan"}:
             if args.library_id:
                 from .library_registry import LibraryRegistry
                 selected = LibraryRegistry(ROOT / 'runtime/libraries.json').config_for(args.library_id, _config())
@@ -607,8 +683,9 @@ def main(argv=None):
                     request["kind"] = "movie"
                     request.pop("season", None)
             else:
-                request = {key: value for key, value in vars(args).items() if key not in {"command", "apply"} and value is not None}
-                apply = args.apply
+                request = {key: value for key, value in vars(args).items()
+                           if key not in {"command", "apply", "plan"} and value is not None}
+                apply = args.apply and not args.plan
             result = _run(request, apply=apply)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 3 if result.get("status") in {"NEEDS_INPUT", "NEEDS_AUTH", "UNKNOWN", "RISK_CONTROL"} else 1 if result.get("status") in {"FAILED", "PARTIAL"} else 0
@@ -620,5 +697,5 @@ def main(argv=None):
         except ImportError:
             MetadataError = ValueError
         safe = isinstance(exc, (ProviderError, MetadataError, ValueError, RuntimeError)) and not isinstance(exc, OSError)
-        print(json.dumps({"status": "FAILED", "reason": str(exc) if safe else "后台任务未完成，请检查本机配置和运行记录", "error_type": type(exc).__name__, "browser_opened": False}, ensure_ascii=False))
+        print(json.dumps({"status": "FAILED", "reason": str(exc) if safe else "任务未完成，请检查本机配置和运行记录", "error_type": type(exc).__name__, "browser_opened": False}, ensure_ascii=False))
         return 1

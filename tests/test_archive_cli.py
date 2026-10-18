@@ -31,7 +31,10 @@ class ArchiveCommandTests(unittest.TestCase):
         self.registry.connect(drive_reference("new-drive", 2))
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.stack.enter_context(patch("media_helper.headless_cli._storage", return_value=self.storage))
+        def default_storage(config):
+            self.storage.account_scope = "quark:alist-storage:" + str(config["credential_source"]["storage_id"])
+            return self.storage
+        self.stack.enter_context(patch("media_helper.headless_cli._storage", side_effect=default_storage))
         def named(drive):
             self.storage.account_scope = drive["account_scope"]
             return self.storage
@@ -67,6 +70,31 @@ class ArchiveCommandTests(unittest.TestCase):
             self.assertEqual(result["status"], "PLAN", result)
             self.assertFalse(result["writes_attempted"])
             self.assertEqual((self.storage.created, self.storage.submissions), ([], []))
+
+    def test_fetch_reports_source_and_save_task_ids_without_changing_legacy_task_id(self):
+        from tests.test_archive_flow import SOURCE, candidate
+        source_task_id = "a" * 32
+        with patch("media_helper.tasks.TaskStore.load", return_value={}):
+            with patch("media_helper.archive_flow.task_candidate", return_value=(candidate(), SOURCE)):
+                with patch("media_helper.archive_flow.fetch", return_value={
+                        "status": "UNKNOWN", "task_id": "cloud-save-task", "save_task_id": "cloud-save-task"}):
+                    result = self.command("fetch", source_task_id, "--candidate-id", candidate()["candidate_id"], "--reconcile")
+        self.assertEqual(result["task_id"], source_task_id)
+        self.assertEqual(result["source_task_id"], source_task_id)
+        self.assertEqual(result["save_task_id"], "cloud-save-task")
+
+    def test_fetch_cannot_reuse_another_connection_or_unbound_task_for_writes(self):
+        for scope in (None, "quark:alist-storage:2"):
+            with self.subTest(scope=scope):
+                task = {} if scope is None else {"account_scope": scope}
+                with patch("media_helper.tasks.TaskStore.load", return_value=task), \
+                        patch("media_helper.archive_flow.task_candidate") as candidate, \
+                        patch("media_helper.archive_flow.fetch") as fetch:
+                    result = self.command("fetch", "a" * 32, "--candidate-id", "b" * 64, "--apply")
+                self.assertEqual(result["status"], "NEEDS_INPUT", result)
+                self.assertFalse(result["writes_attempted"])
+                candidate.assert_not_called()
+                fetch.assert_not_called()
 
     def test_apply_stages_only_and_task_id_is_durable_before_reconciliation(self):
         with patch("media_helper.library_import.apply_import", side_effect=AssertionError("extract must not import")):

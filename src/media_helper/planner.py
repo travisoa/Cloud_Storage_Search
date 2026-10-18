@@ -13,7 +13,10 @@ from typing import Any
 
 VIDEO_EXTENSIONS = {".mkv", ".mp4", ".avi", ".mov", ".m4v", ".ts", ".m2ts", ".webm", ".mpg", ".mpeg", ".wmv", ".flv", ".iso"}
 SUBTITLE_EXTENSIONS = {".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx"}
-_SE = re.compile(r"(?<![A-Za-z0-9])S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)", re.I)
+# Compact generated names also follow English/numeric titles without a space.
+# Keep the legacy boundary for other spellings; the added form is exact SxxExx.
+_SE = re.compile(r"(?:(?<![A-Za-z0-9])|(?=(?-i:S[0-9]{2}E[0-9]{2,3})(?![A-Za-z0-9])))"
+                 r"S(\d{1,2})[ ._-]*E(\d{1,3})(?!\d)", re.I)
 _E = re.compile(r"(?<![A-Za-z0-9])EP?[ ._-]?(\d{1,3})(?!\d)", re.I)
 _CN_NUMBER = r"[零〇一二两三四五六七八九十百\d]+"
 _CN_EPISODE = re.compile(r"第\s*(" + _CN_NUMBER + r")\s*集")

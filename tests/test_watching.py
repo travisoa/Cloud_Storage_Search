@@ -150,13 +150,18 @@ class SubscriptionCycleTests(unittest.TestCase):
         report = self.cycle()
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual(self.storage.saved, [["source2"]])
-        self.assertEqual(self.storage.renamed, [("new-source2", "测试剧 (2026) S01E02 [2160p].mkv")])
+        self.assertEqual(self.storage.renamed, [("new-source2", "测试剧 (2026)S01E02_2160P.mkv")])
         self.assertEqual(report["missing"], [])
         self.assertEqual([row["fid"] for row in report["new_files"]], ["new-source2"])
         self.assertTrue(report["writes_performed"])
         self.assertEqual({parent for _, parent in self.storage.share_calls}, {"0", "shareSeries", "source4k"})
         self.fallback.search.assert_not_called()
         self.assertNotIn("do-not-persist", str(report))
+        from media_helper.headless_cli import _task_scope_issue
+        from media_helper.storage_connection import account_scope
+        task = TaskStore(self.root / 'runtime/tasks', self.config['library_root_id']).load(report['task_id'])
+        self.assertEqual(task['account_scope'], account_scope(self.config))
+        self.assertIsNone(_task_scope_issue(task, self.config, apply=True))
 
     def test_readonly_auto_disabled_and_blocked_cycles_cannot_write(self):
         for apply, changes in ((False, {}), (True, {"auto_save": False}), (True, {"blocked": True})):
@@ -272,6 +277,25 @@ class SubscriptionCycleTests(unittest.TestCase):
         self.assertEqual([call.kwargs["apply"] for call in run.call_args_list], [False, True])
         reconcile.assert_called_once()
         self.fallback.search.assert_not_called()
+
+    def test_empty_ready_recovery_replans_this_cycle_before_any_new_write(self):
+        from media_helper.journal import JobJournal
+        req = subscription()["request"]
+        identity = workflow._job_identity(req, self.storage)
+        journal = JobJournal(self.root / "runtime/jobs.sqlite")
+        try:
+            journal.put("season:" + workflow._digest(identity),
+                        {"schema_version": 2, "identity": identity, "state": "ready", "operations": [],
+                         "configuration": workflow._execution_config(req), "target_folder_id": "season"})
+        finally:
+            journal.close()
+        with patch("media_helper.watching.workflow.run", wraps=workflow.run) as run:
+            report = self.cycle()
+        calls = [(call.kwargs["apply"], call.kwargs.get("resume_only", False)) for call in run.call_args_list]
+        self.assertEqual(report["status"], "COMPLETE", report)
+        self.assertEqual(self.storage.saved, [["source2"]])
+        self.assertEqual(calls[:3], [(False, False), (True, True), (False, False)])
+        self.assertEqual([row["fid"] for row in report["new_files"]], ["new-source2"])
 
     def test_postsave_directory_ambiguity_remains_attention_and_retains_saved_evidence(self):
         original_run = workflow.run

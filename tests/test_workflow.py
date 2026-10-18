@@ -97,7 +97,7 @@ class Storage:
             self.task_ids.append(new_id)
             self.folders[target].append(file(new_id, source["name"], target, size=source["size"]))
         if self.conflict_after_save:
-            self.folders[target].append(file("concurrent", "测试剧 (2026) S01E02 [1080p].MKV"))
+            self.folders[target].append(file("concurrent", "测试剧 (2026)S01E02_1080P.MKV"))
         if self.fail_save:
             raise UnknownSave("secret transport URL and Cookie value")
         return {"task_id": "task-1", "status": "done",
@@ -140,6 +140,89 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual([row["source"]["fid"] for row in report["plan"]], ["source-2", "subtitle-2"])
         self.assertFalse(report["writes_performed"])
         self.assertEqual((self.storage.saved, self.storage.renamed, self.journal.events), ([], [], []))
+
+    def test_invalid_video_sizes_require_review_without_any_write(self):
+        for size in (None, 0, -1, True, "123", 123.0):
+            with self.subTest(size=size):
+                storage, journal = Storage(), Journal()
+                storage.shared = [file("source-2", "测试剧.S01E02.1080p.mkv", size=size)]
+                report = run(request(), storage, self.metadata, self.search, journal, apply=True)
+                self.assertEqual(report["status"], "NEEDS_INPUT", report)
+                self.assertEqual(report["plan"], [])
+                self.assertIn("source_size_must_be_positive_integer", report["source_review"][0]["reasons"])
+                self.assertEqual((storage.saved, storage.renamed, storage.created, journal.events), ([], [], [], []))
+
+    def test_invalid_associated_subtitle_sizes_block_the_episode_before_writes(self):
+        for size in (None, 0, -1, True, "7", 7.0):
+            with self.subTest(size=size):
+                storage, journal = Storage(), Journal()
+                storage.shared[-1]["size"] = size
+                report = run(request(), storage, self.metadata, self.search, journal, apply=True)
+                self.assertEqual(report["status"], "NEEDS_INPUT", report)
+                self.assertEqual(report["unresolved_episodes"]["S01E02"],
+                                 [{"reason": "associated_subtitle_size_unverified"}])
+                self.assertEqual((storage.saved, storage.renamed, storage.created, journal.events), ([], [], [], []))
+
+    def test_saved_verification_requires_positive_integer_source_and_actual_sizes(self):
+        from media_helper.workflow import _verify_saved
+        operation = {"target_parent_id": "season", "before_fids": ["old-1"], "saved_fids": ["new2"],
+                     "files": [{"source_fid": "source2", "name": "测试剧.S01E02.mkv", "size": None,
+                                "target_name": "测试剧 (2026)S01E02.mkv"}]}
+        self.storage.folders["season"].append(file("new2", "测试剧.S01E02.mkv", size=999))
+        self.assertIsNone(_verify_saved(self.storage, operation))
+        operation["files"][0]["size"] = 1
+        self.storage.folders["season"][-1]["size"] = True
+        self.assertIsNone(_verify_saved(self.storage, operation))
+        self.storage.folders["season"][-1]["size"] = 1
+        self.assertEqual(_verify_saved(self.storage, operation)[0]["saved_fid"], "new2")
+
+    def test_password_url_uses_only_public_source_identity_in_all_report_hashes(self):
+        from media_helper.sources import source_digest
+        url = "https://pan.quark.cn/s/abc123"
+        protected_url = url + "?pwd=private-code"
+        self.search.hits = [{"title": "测试剧", "url": protected_url, "provider": "quark"}]
+        report = self.run_workflow()
+        self.assertEqual(report["status"], "READY", report)
+        self.assertEqual(report["resource_checks"][0]["source"], _digest(url))
+        self.assertEqual(source_digest(protected_url), _digest(url))
+        for row in report["plan"]:
+            self.assertEqual(row["share_source"]["source_hash"], _digest(url))
+            self.assertEqual(row["candidate_id"], _digest((_digest(url), row["source"]["fid"])))
+        serialized = json.dumps(report)
+        self.assertNotIn("private-code", serialized)
+        self.assertNotIn(_digest(protected_url), serialized)
+        self.assertEqual(report["source_refs"], [])
+
+    def test_new_account_scope_blocks_legacy_records_before_cloud_reads_or_writes(self):
+        from media_helper.workflow import _job_identity
+        self.storage.account_scope = "quark:alist-storage:family"
+        self.storage.legacy_account_scopes = ("quark-root:root",)
+        identity = dict(_job_identity(request(), self.storage), account_scope="quark-root:root")
+        old_key = "season:" + _digest(identity)
+        for state in ("save_pending", "complete"):
+            with self.subTest(state=state):
+                self.journal.records = {old_key: {"identity": identity, "state": state, "operations": []}}
+                with patch.object(self.storage, "list_files", side_effect=AssertionError("must not read cloud")):
+                    report = self.run_workflow(apply=True)
+                self.assertEqual(report["status"], "NEEDS_INPUT", report)
+                self.assertEqual(report["reasons"], ["legacy_account_scope_requires_confirmation"])
+                self.assertEqual(report["legacy_job_key"], old_key)
+                self.assertEqual(self.search.calls, 0)
+                self.assertEqual((self.storage.saved, self.storage.renamed, self.journal.events), ([], [], []))
+
+    def test_current_account_record_takes_precedence_over_legacy_scope(self):
+        from media_helper.workflow import _job_identity, _execution_config
+        self.storage.account_scope = "quark:alist-storage:family"
+        self.storage.legacy_account_scopes = ("quark-root:root",)
+        identity = _job_identity(request(), self.storage)
+        key = "season:" + _digest(identity)
+        old_key = "season:" + _digest(dict(identity, account_scope="quark-root:root"))
+        self.journal.records[old_key] = {"state": "unknown", "operations": []}
+        self.journal.records[key] = {"identity": identity, "state": "complete", "operations": [],
+                                     "configuration": _execution_config(request())}
+        report = self.run_workflow()
+        self.assertEqual(report["status"], "READY", report)
+        self.assertEqual(report["job_key"], key)
 
     def test_selected_plan_retains_safe_share_directory_and_label_references(self):
         from media_helper.sources import extract_selected_sources
@@ -235,14 +318,31 @@ class WorkflowScenarios(unittest.TestCase):
         report = self.run_workflow(apply=True)
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual(self.storage.saved, [["source-2", "subtitle-2"]])
-        self.assertEqual(self.storage.renamed, [("new-source-2", "测试剧 (2026) S01E02 [1080p].MKV"),
-                                               ("new-subtitle-2", "测试剧 (2026) S01E02 [1080p].zh-Hans.forced.ASS")])
+        self.assertEqual(self.storage.renamed, [("new-source-2", "测试剧 (2026)S01E02_1080P.MKV"),
+                                               ("new-subtitle-2", "测试剧 (2026)S01E02_1080P.zh-Hans.forced.ASS")])
         self.assertEqual(self.storage.folders["season"][0], before)
         self.assertEqual([row["state"] for row in report["operations"]], ["complete"])
         serialized = json.dumps([report, self.journal.events])
         self.assertNotIn("do-not-persist", serialized)
         self.assertNotIn("stoken", serialized)
         self.assertNotIn("share_fid_token", serialized)
+
+    def test_new_media_suffix_keeps_audio_and_subtitle_alignment_without_changing_source(self):
+        stem = "测试剧.S01E02.2160p.HEVC.DV.TrueHD7.1.Atmos"
+        self.storage.shared = [file("source-2", stem + ".MKV"),
+                               file("subtitle-2", stem + ".zh-Hans.forced.ASS", size=7)]
+        original_sources = deepcopy(self.storage.shared)
+        original_existing = deepcopy(self.storage.folders["season"][0])
+
+        report = self.run_workflow(apply=True)
+
+        self.assertEqual(report["status"], "COMPLETE", report)
+        self.assertEqual(self.storage.shared, original_sources)
+        self.assertEqual(self.storage.folders["season"][0], original_existing)
+        self.assertEqual(self.storage.renamed,
+                         [("new-source-2", "测试剧 (2026)S01E02_2160P_DV_TrueHD7.1.Atmos.MKV"),
+                          ("new-subtitle-2", "测试剧 (2026)S01E02_2160P_DV_TrueHD7.1.Atmos.zh-Hans.forced.ASS")])
+        self.assertEqual(report["plan"][0]["media_info"]["codec"], "HEVC")
 
     def test_repeated_completed_request_does_not_save_again(self):
         self.run_workflow(apply=True)
@@ -317,7 +417,7 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual([(row["fid"], row["name"], row["size"]) for row in received],
                          [("source-2", "02.mkv", 123)])
-        self.assertEqual(self.storage.renamed, [("new-source-2", "测试剧 (2026) S01E02.mkv")])
+        self.assertEqual(self.storage.renamed, [("new-source-2", "测试剧 (2026)S01E02.mkv")])
         source = report["operations"][0]["files"][0]
         self.assertEqual((source["source_fid"], source["name"], source["size"]), ("source-2", "02.mkv", 123))
         evidence = report["source_episode_mapping_applied"]
@@ -408,7 +508,7 @@ class WorkflowScenarios(unittest.TestCase):
         report = self.run_workflow()
         self.assertEqual(report["status"], "READY", report)
         self.assertEqual(report["plan"][0]["source"]["fid"], "uhd-source")
-        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026) S01E02 [2160p].mkv")
+        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026)S01E02_2160P.mkv")
         candidate = next(row for row in report["source_candidates"] if row["fid"] == "uhd-source")
         self.assertEqual(candidate["media_info"]["basis"], "parent_directory")
         self.assertEqual(candidate["parent_id"], "4k-dir")
@@ -418,7 +518,7 @@ class WorkflowScenarios(unittest.TestCase):
         self.storage.shared.append(file("uhd-source", "测试剧.S01E02.4K.mkv"))
         report = self.run_workflow(include_media_tags=False)
         self.assertEqual(report["plan"][0]["source"]["fid"], "uhd-source")
-        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026) S01E02.mkv")
+        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026)S01E02.mkv")
 
     def test_configured_quality_preference_accepts_4k_alias_and_hd_first(self):
         self.storage.shared.append(file("uhd-source", "测试剧.S01E02.4K.mkv"))
@@ -537,7 +637,7 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual(self.search.calls, 0)
         self.assertEqual(self.storage.saved, [["source-2"]])
         self.assertEqual(self.storage.renamed,
-                         [("new-source-2", "测试剧 (2026) S01E02 [2160p].mkv")])
+                         [("new-source-2", "测试剧 (2026)S01E02_2160P.mkv")])
         self.assertNotIn("new-source-3", {row["fid"] for row in self.storage.folders["season"]})
         self.assertEqual([row["episode_key"] for operation in resumed["operations"]
                           for row in operation["verified_files"]], ["S01E02"])
@@ -559,8 +659,8 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual(self.search.calls, 1)
         self.assertEqual(self.storage.saved, [["source-2"], ["source-3"]])
         self.assertEqual(self.storage.renamed,
-                         [("new-source-2", "测试剧 (2026) S01E02 [2160p].mkv"),
-                          ("new-source-3", "测试剧 (2026) S01E03 [1080p].mkv")])
+                         [("new-source-2", "测试剧 (2026)S01E02_2160P.mkv"),
+                          ("new-source-3", "测试剧 (2026)S01E03_1080P.mkv")])
 
     def test_successful_rename_with_lost_response_resumes_by_fid_without_repeating_save_or_rename(self):
         rename = self.storage.rename
@@ -607,7 +707,7 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual([(row["parent_id"], row["name"]) for row in self.storage.created],
                          [("tv", "测试剧 (2026)"), ("dir-0", "Season 01")])
-        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026) S01E02 [1080p].MKV")
+        self.assertEqual(report["plan"][0]["target_name"], "测试剧 (2026)S01E02_1080P.MKV")
 
     def test_mkdir_visibility_lag_retries_only_reads_and_records_returned_fid_first(self):
         self.storage.folders = {"root": [file("tv", "电视剧", "root", directory=True)], "tv": []}
@@ -758,7 +858,7 @@ class WorkflowScenarios(unittest.TestCase):
         self.assertEqual(report["directory_match_basis"]["method"], "unique_bare_title_with_existing_episode_evidence")
         self.assertEqual(report["directory_match_basis"]["evidence"][0]["fid"], "old-1")
         self.assertEqual(self.storage.folders["tv"][0]["name"], "测试剧")
-        self.assertEqual(report["plan"][0]["target_name"], "测试剧 S01E02 [1080p].MKV")
+        self.assertEqual(report["plan"][0]["target_name"], "测试剧S01E02_1080P.MKV")
 
     def test_direct_show_match_never_opens_other_shows_even_for_explicit_season_target(self):
         for name, target in (("测试剧", None), ("测试剧 (2026)", None), ("测试剧", "season")):
@@ -780,7 +880,7 @@ class WorkflowScenarios(unittest.TestCase):
                 report = self.run_workflow(**options)
                 self.assertEqual(report["status"], "READY", report)
                 self.assertEqual(report["target_folder_id"], "season")
-                self.assertEqual(report["plan"][0]["target_name"], f"{name} S01E02 [1080p].MKV")
+                self.assertEqual(report["plan"][0]["target_name"], f"{name}S01E02_1080P.MKV")
 
     def test_bare_title_with_duplicate_or_competing_year_directory_requires_input(self):
         for competing in ("测试剧", "测试剧 (2025)", "测试剧 (2026)"):

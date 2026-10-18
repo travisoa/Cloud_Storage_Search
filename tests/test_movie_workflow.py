@@ -121,8 +121,8 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertFalse(report["writes_attempted"])
         self.assertEqual(report["directories"], [{"parent_id": "movies", "name": "沙丘2 (2024)"}])
         self.assertEqual([row["source"]["fid"] for row in report["plan"]], ["v4k", "sub"])
-        self.assertEqual(report["plan"][0]["target_name"], "沙丘2 (2024) [2160p HEVC].mkv")
-        self.assertEqual(report["plan"][1]["target_name"], "沙丘2 (2024) [2160p HEVC].zh.srt")
+        self.assertEqual(report["plan"][0]["target_name"], "沙丘2 (2024)_2160P.mkv")
+        self.assertEqual(report["plan"][1]["target_name"], "沙丘2 (2024)_2160P.zh.srt")
         reasons = {row["fid"]: row["reason"] for row in report["source_review"]}
         self.assertEqual(reasons["trailer"], "extra_or_trailer_not_a_feature")
         self.assertEqual([row["fid"] for row in report["archive_candidates"]], ["zip"])
@@ -134,8 +134,8 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual([row["name"] for row in self.storage.created], ["沙丘2 (2024)"])
         self.assertEqual(self.storage.saved, [["new-v4k", "new-sub"]])
-        self.assertEqual(sorted(self.storage.renamed), [("new-sub", "沙丘2 (2024) [2160p HEVC].zh.srt"),
-                                                        ("new-v4k", "沙丘2 (2024) [2160p HEVC].mkv")])
+        self.assertEqual(sorted(self.storage.renamed), [("new-sub", "沙丘2 (2024)_2160P.zh.srt"),
+                                                        ("new-v4k", "沙丘2 (2024)_2160P.mkv")])
         self.assertNotIn("old", [fid for fid, _ in self.storage.renamed])
         again = run(request(), self.storage, self.search, self.journal, apply=True)
         self.assertEqual(again["status"], "COMPLETE", again)
@@ -164,6 +164,50 @@ class MovieWorkflowTests(unittest.TestCase):
         report = run(request(), self.storage, self.search, self.journal)
         self.assertEqual(report["status"], "NEEDS_INPUT")
         self.assertIn("movie_directory_has_competing_identity_or_year", report["reasons"])
+
+    def test_qualified_or_separated_year_directories_block_parallel_movie_folder(self):
+        for name in ("沙丘2.2024", "沙丘2_2024", "沙丘2-2024", "沙丘2 (2024) 4K"):
+            with self.subTest(name=name):
+                storage = Storage()
+                storage.folders["movies"].append(file("dune", name, "movies", directory=True))
+                storage.folders["dune"] = []
+                search = Search()
+                report = run(request(), storage, search, Journal(), apply=True)
+                self.assertEqual(report["status"], "NEEDS_INPUT", report)
+                self.assertIn("movie_directory_identity_requires_confirmation", report["reasons"])
+                self.assertEqual((storage.created, storage.saved, storage.renamed), ([], [], []))
+                self.assertEqual(search.calls, 0)
+
+    def test_folders_inside_works_and_other_dated_works_do_not_block(self):
+        self.storage.folders["movies"] += [file("dune", "沙丘2 (2024)", "movies", directory=True),
+                                           file("dune1", "沙丘 (2021)", "movies", directory=True)]
+        self.storage.folders["dune"] = [file("release", "沙丘2.2024.2160p.UHD.BluRay", "dune", directory=True)]
+        self.storage.folders["release"] = [file("have", "Dune2.mkv", "release")]
+        self.storage.folders["dune1"] = [file("teaser", "沙丘2 先导预告", "dune1", directory=True)]
+        self.storage.folders["teaser"] = []
+        report = run(request(), self.storage, self.search, self.journal)
+        self.assertEqual(report["status"], "UP_TO_DATE", report)
+
+    def test_latin_title_blocks_only_as_a_whole_word_of_the_same_year(self):
+        for names, blocked in ((["Kite", "Split (2016)", "It Follows (2014)", "Little Women"], False),
+                               (["It.2017.2160p"], True), (["It Chapter One"], True)):
+            with self.subTest(names=names):
+                storage = Storage()
+                for index, name in enumerate(names):
+                    storage.folders["movies"].append(file("d%d" % index, name, "movies", directory=True))
+                    storage.folders["d%d" % index] = []
+                report = run(request(title="It", year=2017, aliases=[]), storage, Search(), Journal())
+                self.assertEqual("movie_directory_identity_requires_confirmation" in report["reasons"], blocked, report)
+
+    def test_unverifiable_subtitle_size_stops_before_any_write(self):
+        for size in (0, None):
+            with self.subTest(size=size):
+                storage = Storage()
+                storage.shared["s-dir"][1]["size"] = size
+                report = run(request(), storage, Search(), Journal(), apply=True)
+                self.assertEqual(report["status"], "NEEDS_INPUT", report)
+                self.assertIn("associated_subtitle_size_unverified", report["reasons"])
+                self.assertEqual((storage.created, storage.saved, storage.renamed), ([], [], []))
 
     def test_equal_versions_need_selection_and_explicit_choice_is_honoured(self):
         self.storage.shared["s-dir"].append(file("v4k-b", "沙丘2.2024.4K.mkv", "s-dir"))
@@ -199,6 +243,51 @@ class MovieWorkflowTests(unittest.TestCase):
         self.assertEqual(self.storage.saved, [])
         self.assertEqual(len(self.storage.renamed), 2)
 
+    def test_completed_movie_is_reverified_and_changed_files_are_not_complete(self):
+        mutations = ("size", "parent", "missing", "saved_count", "duplicate_saved_fid")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                storage, journal = Storage(), Journal()
+                saved = run(request(), storage, Search(), journal, apply=True)
+                self.assertEqual(saved["status"], "COMPLETE", saved)
+                record = journal.records[saved["job_key"]]
+                operation = record["operations"][0]
+                files = storage.folders[operation["target_parent_id"]]
+                if mutation == "size":
+                    files[0]["size"] += 1
+                elif mutation == "parent":
+                    files[0]["parent_id"] = "other"
+                elif mutation == "missing":
+                    files.pop()
+                elif mutation == "saved_count":
+                    operation["saved_fids"].pop()
+                else:
+                    operation["saved_fids"][1] = operation["saved_fids"][0]
+                before = deepcopy((storage.created, storage.saved, storage.renamed))
+                checked = reconcile(request(), storage, journal)
+                self.assertEqual(checked["status"], "UNKNOWN", checked)
+                self.assertFalse(checked["writes_attempted"])
+                self.assertEqual((storage.created, storage.saved, storage.renamed), before)
+
+    def test_reconcile_verifies_completed_files_and_preserves_their_source_mapping(self):
+        self.storage.shared["s-dir"][1]["size"] = self.storage.shared["s-dir"][0]["size"]
+        saved = run(request(), self.storage, self.search, self.journal, apply=True)
+        checked = reconcile(request(), self.storage, self.journal)
+        self.assertEqual(checked["status"], "COMPLETE", checked)
+        operation = self.journal.records[saved["job_key"]]["operations"][0]
+        files = self.storage.folders[operation["target_parent_id"]]
+        files[0]["name"], files[1]["name"] = files[1]["name"], files[0]["name"]
+        checked = reconcile(request(), self.storage, self.journal)
+        self.assertEqual(checked["status"], "UNKNOWN", checked)
+        self.assertIn("saved_file_source_mapping_changed", checked["reasons"])
+
+    def test_reconcile_rejects_operation_outside_the_current_movie_directory(self):
+        saved = run(request(), self.storage, self.search, self.journal, apply=True)
+        self.journal.records[saved["job_key"]]["operations"][0]["target_parent_id"] = "other"
+        checked = reconcile(request(), self.storage, self.journal)
+        self.assertEqual(checked["status"], "NEEDS_INPUT", checked)
+        self.assertIn("operation_target_not_in_observed_destination_scope", checked["reasons"])
+
     def test_movie_without_confirmed_identity_needs_input(self):
         report = run(request(movie_id=None), self.storage, self.search, self.journal, apply=True)
         self.assertEqual(report["status"], "NEEDS_INPUT")
@@ -206,7 +295,7 @@ class MovieWorkflowTests(unittest.TestCase):
 
     def test_movie_filename_keeps_prefix_and_tags(self):
         self.assertEqual(movie_filename("沙丘2 (2024)", ".mkv", {"resolution": "2160p", "hdr": "HDR10"}),
-                         "沙丘2 (2024) [2160p HDR10].mkv")
+                         "沙丘2 (2024)_2160P_HDR10.mkv")
         self.assertEqual(movie_filename("沙丘2 (2024)", ".mp4", {}), "沙丘2 (2024).mp4")
 
 

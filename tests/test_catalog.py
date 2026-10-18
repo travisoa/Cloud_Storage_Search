@@ -52,6 +52,18 @@ class InventoryScenarios(unittest.TestCase):
     def test_explicit_filename_season_wins_over_default(self):
         self.assertEqual(parse_file("剧.S02E01.mkv", season=1)["episode_key"], "S02E01")
 
+    def test_compact_episode_names_remain_visible_to_inventory(self):
+        for name in ("ExampleShowS01E02.mkv", "AS01E02.mkv", "123S01E02.mkv"):
+            with self.subTest(name=name):
+                parsed = parse_file(name)
+                self.assertEqual(parsed["episode_key"], "S01E02", parsed)
+                self.assertFalse(parsed["ambiguous"])
+        names = ["Example ShowS01E02_2160P_DV_DDP5.1.mkv",
+                 "示例剧 (2026)S02E03_1080P_SDR.mp4"]
+        inventory = build_episode_inventory(names)
+        self.assertEqual(set(inventory["existing"]), {"S01E02", "S02E03"})
+        self.assertEqual(inventory["review"], [])
+
     def test_multi_episode_and_special_files_are_review_only(self):
         inventory = build_episode_inventory(["剧.S01E01-E02.mkv", "剧.SP01.mkv", "剧.S00E01.mkv", "剧.特别篇.mp4"], season=1)
         self.assertEqual(inventory["existing"], {})
