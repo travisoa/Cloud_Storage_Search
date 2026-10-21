@@ -218,6 +218,55 @@ class ResolverTests(unittest.TestCase):
         self.assertEqual(self.resolve("示例剧 (2026) S01E01.mkv")["reason"], "unsafe_target_title_requires_confirmation")
 
 
+class ExplicitEpisodeTests(unittest.TestCase):
+    """A caller-supplied season/episode fills in what a single file's name lacks."""
+
+    def setUp(self):
+        self.resolver = MediaResolver(Metadata())
+
+    def resolve(self, name, episode=(1, 2), title=None, **context):
+        if episode:
+            context["explicit_episode"] = {"season": episode[0], "episode": episode[1]}
+        if title:
+            context["explicit_title"] = {"title": title[0], "year": title[1]}
+        return self.resolver({"fid": "file-1", "name": name, "size": 100}, context)
+
+    def test_bare_or_episode_only_names_resolve_with_the_supplied_pair(self):
+        for name, context in (("02.mkv", {"ancestors": ["示例剧 (2026)"]}),
+                              ("示例剧.2026.第2集.mkv", {}), ("示例剧 (2026) E02.mkv", {}),
+                              ("示例剧 (2026) S01E02.mkv", {})):
+            with self.subTest(name=name):
+                result = self.resolve(name, **context)
+                self.assertEqual((result["status"], result["kind"], result["title"], result["season"], result["episode"]),
+                                 ("MATCHED", "tv", "示例剧", 1, 2), result)
+        self.assertEqual(self.resolve("02.mkv", episode=None, ancestors=["示例剧 (2026)"])["reason"],
+                         "explicit_season_and_episode_required")
+
+    def test_supplied_title_only_fills_a_missing_identity(self):
+        result = self.resolve("02.mkv", title=("示例剧", 2026), ancestors=["价J拆_xxx"])
+        self.assertEqual((result["status"], result["title"], result["episode"]), ("MATCHED", "示例剧", 2))
+        self.assertEqual(self.resolve("02.mkv", ancestors=["价J拆_xxx"])["reason"], "title_and_release_year_required")
+        self.assertEqual(self.resolve("示例剧 (2026) E02.mkv", title=("别的剧", 2026))["reason"],
+                         "filename_and_explicit_title_conflict")
+
+    def test_supplied_pair_never_overrides_a_different_marker(self):
+        for name in ("03.mkv", "示例剧 (2026) E03.mkv", "示例剧 (2026) S01E03.mkv", "示例剧 第2季 E02.mkv",
+                     "示例剧 S02 02.mkv", "示例剧 (2026) E02 花絮.mkv", "示例剧 (2026) E02-E03.mkv"):
+            with self.subTest(name=name):
+                self.assertEqual(self.resolve(name, title=("示例剧", 2026))["reason"],
+                                 "explicit_episode_disagrees_with_filename")
+        self.assertEqual(self.resolve("02.mkv", ancestors=["示例剧 (2026)", "Season 02"])["reason"],
+                         "filename_and_directory_season_conflict")
+
+    def test_invalid_pairs_movie_context_and_unknown_episodes_are_rejected(self):
+        for episode in ((0, 2), (1, 1000), ("1", 2)):
+            with self.subTest(episode=episode):
+                self.assertEqual(self.resolve("02.mkv", episode=episode)["reason"], "explicit_episode_invalid")
+        self.assertEqual(self.resolve("示例剧 (2026) E02.mkv", kind="movie")["reason"],
+                         "filename_and_directory_kind_conflict")
+        self.assertEqual(self.resolve("示例剧 (2026) E03.mkv", episode=(1, 3))["reason"], "episode_not_uniquely_confirmed")
+
+
 class TMDBMovieAdapterTests(unittest.TestCase):
     class Provider:
         source = "tmdb"

@@ -12,13 +12,14 @@ import re
 import unicodedata
 
 from .catalog import MetadataError, parse_file
-from .planner import _SE as _PAIR
+from .planner import _SE as _PAIR, _episode_metadata
 
 
 _CN_PAIR = re.compile(r"第\s*[零〇一二两三四五六七八九十百\d]+\s*季.*?第\s*[零〇一二两三四五六七八九十百\d]+\s*集")
 _ANY_EPISODE = re.compile(r"(?<![A-Za-z0-9])(?:S\d{1,2}|EP?\d{1,3})(?!\d)|第.+?[季集]", re.I)
 _YEAR = re.compile(r"(?<!\d)((?:18|19|2\d)\d{2})(?!\d)")
 _SEASON_FOLDER = re.compile(r"(?:Season[ ._-]*(\d{1,2})|第\s*(\d{1,2})\s*季)", re.I)
+_SEASON_ONLY = re.compile(r"(?<![A-Za-z0-9])S(\d{1,2})(?![0-9])(?![ ._-]*E\d)", re.I)
 _QUALITY = re.compile(r"(?<![A-Za-z0-9])(?:\d{3,4}p|[248]k|uhd|hevc|avc|[hx][ ._-]?26[45]|av1|hdr(?:10\+?)?|dovi|dolby[ ._-]*vision|blu[ ._-]*ray|web[ ._-]*(?:dl|rip)|hdtv|remux)(?![A-Za-z0-9])"
                       r"|_(?:DV|SDR|HLG|Atmos|(?:DDP|AC3|TrueHD|DTS(?:-HD(?:\.(?:MA|HRA))?|-X)?|AAC|FLAC|Opus|MP3|L?PCM)(?:[1-9]\.[01](?:\.[2-9])?|[1-9][0-9]?ch)?(?:\.Atmos)?)(?=$|[ ._\-])", re.I)
 _GENERIC = {"电影", "电视剧", "剧集", "影库", "movies", "movie", "tv", "tvshows", "television", "videos", "video", "4k", "1080p", "2160p"}
@@ -72,17 +73,52 @@ def _title_year(value):
     return re.sub(r"[._]+", " ", core).strip(), int(year[1]) if year else None
 
 
+def _explicit(context):
+    """Caller-confirmed season/episode (and optional title/year) for a single file."""
+    episode = context.get("explicit_episode") if isinstance(context, dict) else None
+    if episode is None:
+        return None, None
+    if (not isinstance(episode, dict) or _integer(episode.get("season"), 1, 99) is None
+            or _integer(episode.get("episode"), 1, 999) is None or isinstance(episode["season"], str)
+            or isinstance(episode["episode"], str)):
+        raise ValueError("explicit_episode_invalid")
+    title = context.get("explicit_title")
+    if title is not None and (not isinstance(title, dict) or not _safe_title(title.get("title"))
+                              or _integer(title.get("year"), 1800, 2999) is None or isinstance(title["year"], str)):
+        raise ValueError("explicit_title_invalid")
+    return (episode["season"], episode["episode"]), title
+
+
 def _hints(file, context):
     name = file.get("name") if isinstance(file, dict) else None
     if not _text(name) or "/" in name or "\\" in name:
         return None, "invalid_source_name"
+    try:
+        explicit, explicit_title = _explicit(context)
+    except ValueError as error:
+        return None, str(error)
     stem = posixpath.splitext(name)[0]
     pair = _PAIR.search(stem) or _CN_PAIR.search(stem)
     parsed = parse_file(name)
     if pair and (parsed.get("ambiguous") or parsed.get("season") is None or parsed.get("episode") is None):
         return None, "ambiguous_explicit_episode_markers"
-    if not pair and (_ANY_EPISODE.search(stem) or re.fullmatch(r"\d{1,3}", stem.strip())):
+    marker = None
+    if explicit and pair:
+        if (parsed["season"], parsed["episode"]) != explicit:
+            return None, "explicit_episode_disagrees_with_filename"
+    elif explicit:
+        # The supplied pair fills in a missing season; it never overrides a
+        # different episode number, special or multi-episode marker in the name.
+        _, episode, reasons = _episode_metadata(stem, {}, {"season": explicit[0]})
+        number = re.fullmatch(r"\d{1,3}", stem.strip())
+        seasons = {int(value) for value in _SEASON_ONLY.findall(stem)}
+        if (set(reasons) - {"episode_unknown_no_sort_order_inference"} or (not reasons and episode != explicit[1])
+                or (number and int(number[0]) != explicit[1]) or seasons - {explicit[0]}):
+            return None, "explicit_episode_disagrees_with_filename"
+        marker = _ANY_EPISODE.search(stem) or number
+    elif not pair and (_ANY_EPISODE.search(stem) or re.fullmatch(r"\d{1,3}", stem.strip())):
         return None, "explicit_season_and_episode_required"
+    season = parsed["season"] if pair else explicit[0] if explicit else None
     ancestors = context.get("ancestors") if isinstance(context, dict) else None
     if not isinstance(ancestors, list):
         path = context.get("path", "") if isinstance(context, dict) else ""
@@ -91,31 +127,38 @@ def _hints(file, context):
     folders = [entry for entry in folders if _text(entry)]
     folder_seasons = {int(next(v for v in match.groups() if v is not None)) for folder in folders
                       if (match := _SEASON_FOLDER.fullmatch(folder.strip()))}
-    if pair and (len(folder_seasons) > 1 or (folder_seasons and parsed["season"] not in folder_seasons)):
+    if season and (len(folder_seasons) > 1 or (folder_seasons and season not in folder_seasons)):
         return None, "filename_and_directory_season_conflict"
-    title, year = _title_year(stem[:pair.start()] if pair else stem)
+    title, year = _title_year(stem[:pair.start()] if pair else stem[:marker.start()] if marker else stem)
     folder_identities = [_title_year(folder) for folder in reversed(folders) if not _SEASON_FOLDER.fullmatch(folder.strip())]
     folder_identities = [(t, y) for t, y in folder_identities if y and _normal(t) not in _GENERIC]
     if not title or _normal(title) in _GENERIC:
-        if not folder_identities:
+        if folder_identities:
+            title, year = folder_identities[0]
+        elif not explicit_title:
             return None, "title_and_release_year_required"
-        title, year = folder_identities[0]
     else:
         same = [(t, y) for t, y in folder_identities if _normal(t) == _normal(title)]
         if same and (len({y for _, y in same}) > 1 or (year and any(y != year for _, y in same))):
             return None, "filename_and_directory_year_conflict"
         if not year and same:
             year = same[0][1]
+    if explicit_title:
+        # A complete name/folder identity must agree; an incomplete one yields.
+        if title and year and (_normal(title) != _normal(explicit_title["title"]) or year != explicit_title["year"]):
+            return None, "filename_and_explicit_title_conflict"
+        title, year = explicit_title["title"], explicit_title["year"]
     if not year or not title:
         return None, "title_and_release_year_required"
     from .workflow import _TV_CATEGORY_NAMES, _TV_SUBCATEGORY_NAMES, _normal as category_name
     tv_folders = _TV_CATEGORY_NAMES | _TV_SUBCATEGORY_NAMES | {"television"}
-    if not pair and (context.get("kind") == "tv" or any(category_name(folder) in tv_folders for folder in folders)):
+    if not season and (context.get("kind") == "tv" or any(category_name(folder) in tv_folders for folder in folders)):
         return None, "explicit_season_and_episode_required"
-    if pair and context.get("kind") == "movie":
+    if season and context.get("kind") == "movie":
         return None, "filename_and_directory_kind_conflict"
-    return {"kind": "tv" if pair else "movie", "title": title, "year": year,
-            "season": parsed.get("season") if pair else None, "episode": parsed.get("episode") if pair else None}, None
+    episode = (parsed.get("episode") if pair else explicit[1]) if season else None
+    return {"kind": "tv" if season else "movie", "title": title, "year": year,
+            "season": season, "episode": episode}, None
 
 
 class MediaResolver:

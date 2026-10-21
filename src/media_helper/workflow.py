@@ -1078,6 +1078,9 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
         destination, existing_files, directories = _destination(request, storage, report)
         if report["status"] == "NEEDS_INPUT":
             return report
+        if destination:
+            # Already observed; subscriptions place archive episodes here too.
+            report["target_folder_id"] = destination
         inventory = catalog.build_episode_inventory([file for file in existing_files if not _directory(file)], season=int(request["season"]))
         if inventory["review"]:
             return _needs(report, "existing_library_episode_numbering_ambiguous", inventory_review=inventory["review"])

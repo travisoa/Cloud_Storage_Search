@@ -328,5 +328,45 @@ class ArchiveCleanupOptionTests(ArchiveCommandCase):
         self.assertFalse(_fetched_archive_recycled(self.storage, journal, {**fetched, "target": {"folder_id": "x"}}))
 
 
+class ArchivePlanExplicitEpisodeTests(ArchiveCommandCase):
+    """``archive plan --season/--episode`` for one extracted video named without markers."""
+
+    def setUp(self):
+        super().setUp()
+        from media_helper.library_identity import MediaResolver
+        from tests.test_library_identity import Metadata
+        self.config["categories"]["movie"] = {"folder_id": "movies", "name": "电影"}
+        self.assertEqual(self.command("extract", "--fid", "archive1", "--parent-id", "source", "--apply")["status"],
+                         "EXTRACTED")
+        self.storage.rows["isolated1"] = [item("output1", "02.mkv", "isolated1", size=500)]
+        self.stack.enter_context(patch("media_helper.library_cli._media_resolver",
+                                       side_effect=lambda args, root: MediaResolver(Metadata())))
+
+    def plan(self, *flags):
+        return self.command("plan", "--fid", "archive1", *flags)
+
+    def test_bare_name_needs_and_accepts_an_explicit_episode(self):
+        self.assertEqual(self.plan()["review"][0]["reason"], "explicit_season_and_episode_required")
+        result = self.plan("--season", "1", "--episode", "2", "--title", "示例剧", "--year", "2026")
+        self.assertEqual(result["status"], "READY", result)
+        operation = result["operations"][0]
+        self.assertEqual((operation["identity"]["season"], operation["identity"]["episode"]), (1, 2))
+        self.assertEqual(operation["target_directories"], ["示例剧 (2026)", "Season 01"])
+        self.assertEqual(self.storage.created[-1]["name"][:6], "解压待整理_")
+        self.assertEqual(len(self.storage.created), 1)
+
+    def test_explicit_episode_requires_exactly_one_feature_video(self):
+        self.storage.rows["isolated1"].append(item("output2", "03.mkv", "isolated1", size=500))
+        result = self.plan("--season", "1", "--episode", "2", "--title", "示例剧", "--year", "2026")
+        self.assertEqual((result["status"], result["reasons"]), ("NEEDS_INPUT", ["explicit_episode_requires_single_video_output"]))
+        self.assertFalse((self.root / "runtime/archive-plans").exists())
+
+    def test_partial_or_invalid_explicit_arguments_are_rejected(self):
+        for flags in (("--season", "1"), ("--episode", "2"), ("--title", "示例剧", "--year", "2026"),
+                      ("--season", "1", "--episode", "2", "--title", "示例剧"), ("--season", "0", "--episode", "2")):
+            with self.subTest(flags=flags), self.assertRaises(ValueError):
+                self.plan(*flags)
+
+
 if __name__ == "__main__":
     unittest.main()

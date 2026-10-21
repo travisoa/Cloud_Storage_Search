@@ -26,6 +26,9 @@ HEALTHY_STATUSES = frozenset({"UP_TO_DATE", "WAITING", "READY", "COMPLETE"})
 ATTENTION_STATUSES = frozenset({"NEEDS_INPUT", "NEEDS_AUTH", "RISK_CONTROL", "UNKNOWN", "FAILED",
                                 "PARTIAL", "PENDING", "READY_TO_CONTINUE", "READY_TO_RENAME", "NO_RECORD", "METADATA_CONFLICT"})
 SUPPORTED_STATUSES = HEALTHY_STATUSES | ATTENTION_STATUSES
+# Opt-in source policies; an absent field means the strict default.
+SOURCE_SWITCHES = ("trust_share_title", "wait_on_uncertain_source")
+ARCHIVE_AUTO = (None, "largest")
 _UNSET = object()
 _SECRET = re.compile(r"cookie|auth|token|password|passcode|secret|credential|api[-_]?key|signature|(?:^|_)(?:pwd|sig)(?:$|_)", re.I)
 _ID = re.compile(r"[A-Za-z0-9_-]{1,240}")
@@ -337,6 +340,11 @@ class SubscriptionStore:
             for field in ("enabled", "auto_save", "blocked", "needs_attention"):
                 if type(record.get(field)) is not bool:
                     raise ValueError("订阅授权或阻塞状态无效")
+            for field in SOURCE_SWITCHES:
+                if field in record and type(record[field]) is not bool:
+                    raise ValueError("订阅来源策略开关必须为布尔值")
+            if record.get("archive_auto") not in ARCHIVE_AUTO:
+                raise ValueError("订阅压缩包策略无效")
             hours = record.get("interval_hours")
             if (isinstance(hours, bool) or not isinstance(hours, (int, float))
                     or not math.isfinite(hours) or not 1 <= hours <= 168):
@@ -365,11 +373,14 @@ class SubscriptionStore:
             return deepcopy(record)
 
     def add(self, request, *, preferred_sources=_UNSET, interval_hours=_UNSET, auto_save=_UNSET,
-            numeric_policy=_UNSET, secondary=_UNSET):
+            numeric_policy=_UNSET, secondary=_UNSET, trust_share_title=_UNSET,
+            wait_on_uncertain_source=_UNSET, archive_auto=_UNSET, append_sources=False):
         """Create with six-hour checks and no write authority by default.
 
         Re-adding the same identity updates only explicitly supplied options;
         omitted options retain their prior values and never clear a block.
+        ``append_sources`` adds the supplied sources after the recorded ones
+        instead of replacing them.
         """
         request = _request(request, self.library_root_id)
         identifier, now = _subscription_id(request), _now().isoformat()
@@ -383,13 +394,28 @@ class SubscriptionStore:
                 raise ValueError("追更间隔必须为 1–168 小时")
             if type(authorized) is not bool:
                 raise ValueError("自动转存授权必须为布尔值")
-            sources = _sources(record.get("preferred_sources", ()) if preferred_sources is _UNSET else preferred_sources)
+            if type(append_sources) is not bool:
+                raise ValueError("追加来源选项必须为布尔值")
+            recorded = list(record.get("preferred_sources", ()))
+            if preferred_sources is _UNSET:
+                sources = _sources(recorded)
+            else:
+                sources = _sources([*recorded, *preferred_sources] if append_sources else preferred_sources)
             numeric = _numeric_policy(record.get("numeric_policy") if numeric_policy is _UNSET else numeric_policy, request, sources)
             supplement = _secondary(record.get("secondary") if secondary is _UNSET else secondary, request)
+            switches = {}
+            for field, value in zip(SOURCE_SWITCHES, (trust_share_title, wait_on_uncertain_source)):
+                switches[field] = record.get(field, False) if value is _UNSET else value
+                if type(switches[field]) is not bool:
+                    raise ValueError("订阅来源策略开关必须为布尔值")
+            archives = record.get("archive_auto") if archive_auto is _UNSET else archive_auto
+            if archives not in ARCHIVE_AUTO:
+                raise ValueError("压缩包自动处理策略只能为 largest 或关闭")
             request = {**record.get("request", {}), **request}
             record.update(subscription_id=identifier, library_root_id=self.library_root_id, request=request,
                           preferred_sources=sources, interval_hours=hours, auto_save=authorized,
-                          numeric_policy=numeric, secondary=supplement, updated_at=now)
+                          numeric_policy=numeric, secondary=supplement, archive_auto=archives,
+                          updated_at=now, **switches)
             record.setdefault("created_at", now)
             record.setdefault("enabled", True)
             record.setdefault("blocked", False)

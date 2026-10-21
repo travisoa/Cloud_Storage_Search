@@ -53,6 +53,10 @@ def add_parser(commands):
     plan.add_argument("--fid", required=True, help="the extracted archive's fid")
     plan.add_argument("--library-id")
     plan.add_argument("--metadata-source", choices=("auto", "tmdb", "tvmaze"), default="auto")
+    plan.add_argument("--season", type=int, help="season of the single extracted video, with --episode")
+    plan.add_argument("--episode", type=int, help="episode of the single extracted video, with --season")
+    plan.add_argument("--title", help="work title when neither file nor folders name it, with --year")
+    plan.add_argument("--year", type=int, help="first-air year for --title")
     organize = actions.add_parser("organize", help="execute a saved extraction import plan only with --apply")
     organize.add_argument("plan_id")
     organize.add_argument("--library-id")
@@ -241,10 +245,31 @@ def _library(args, config):
     return output_library(getattr(args, "_library", None) or config)
 
 
+def _explicit_episode(args):
+    """Context for one extracted video whose name lacks a season or episode marker."""
+    season, episode = getattr(args, "season", None), getattr(args, "episode", None)
+    title, year = getattr(args, "title", None), getattr(args, "year", None)
+    if (season is None) != (episode is None):
+        raise ValueError("--season 与 --episode 需同时指定")
+    if (title is None) != (year is None):
+        raise ValueError("--title 与 --year 需同时指定")
+    if season is None:
+        if title is not None:
+            raise ValueError("--title/--year 仅与 --season/--episode 一起使用")
+        return None
+    if not 1 <= season <= 99 or not 1 <= episode <= 999:
+        raise ValueError("季号须为 1–99，集号须为 1–999")
+    context = {"explicit_episode": {"season": season, "episode": episode}}
+    if title is not None:
+        context["explicit_title"] = {"title": title, "year": year}
+    return context
+
+
 def _plan(args, storage, library_root, config, root):
     from .archive_flow import extracted_folder
     from .library_cli import _media_resolver
-    from .library_import import plan_import, scan
+    from .library_import import _is_extra, plan_import, scan
+    explicit = _explicit_episode(args)
     journal = JobJournal(root / "runtime/archive-jobs.sqlite3")
     try:
         folder, bound_root = extracted_folder(journal, _job_key("archive", storage, args.fid))
@@ -253,9 +278,21 @@ def _plan(args, storage, library_root, config, root):
     if bound_root != library_root:
         raise ValueError("解压记录属于其他影库根目录")
     snapshot = scan(storage, source_id=folder, excluded_ids=[library_root])
+    resolver = _media_resolver(args, root)
+    if explicit:
+        # A supplied episode names exactly one feature video, never a batch.
+        videos = [row for row in snapshot["entries"] if row.get("kind") == "video" and not _is_extra(row["path"])]
+        if snapshot.get("status") == "COMPLETE" and len(videos) != 1:
+            return {"status": "NEEDS_INPUT", "reasons": ["explicit_episode_requires_single_video_output"],
+                    "video_count": len(videos), "operations": [], "staging_folder_id": folder,
+                    "writes_attempted": False, "writes_performed": False}
+        resolve = resolver
+
+        def resolver(file, context=None):
+            return resolve(file, {**(context or {}), **explicit})
     account = hashlib.sha256(storage.account_scope.encode()).hexdigest()
     library = {**_library(args, config), "account_scope_hash": account}
-    result = plan_import(snapshot, library, _media_resolver(args, root))
+    result = plan_import(snapshot, library, resolver)
     record_id = uuid.uuid4().hex
     private_json(root / "runtime/archive-plans" / (record_id + ".json"),
                  {"record_id": record_id, "library_root_id": library_root, "archive_fid": args.fid, "report": result})

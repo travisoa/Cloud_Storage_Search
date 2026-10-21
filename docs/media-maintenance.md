@@ -103,6 +103,17 @@ python3 scripts/media.py archive organize PLAN_ID --apply
 
 `archive plan` 仅读取已核验完成（`EXTRACTED`）的解压输出，按[可选扫描与整理](library-bootstrap.md#可选扫描与整理)识别身份并生成计划。`organize` 执行已授权计划，将视频和关联字幕移动至对应分类并命名；未识别文件保留原位，原压缩包及暂存目录按 `archive_cleanup` 处理。
 
+解压输出仅有一个正片视频、文件名缺少季集号（如 `13.mkv`）时，可显式指定：
+
+```bash
+python3 scripts/media.py archive plan --fid 压缩包FID --season 1 --episode 13
+python3 scripts/media.py archive plan --fid 压缩包FID --season 1 --episode 13 --title 剧名 --year 2026
+```
+
+`--title/--year` 仅在文件名与目录都无法给出作品名时使用，且须与 `--season/--episode` 同时指定。指定季集只补充缺失的标记，不覆盖文件名中不同的集号、季号、特别篇或多集标记；作品名与年份仍经元数据精确匹配及该集存在性核验，文件名或目录已有完整作品名时须一致。输出含多个正片视频时返回 `explicit_episode_requires_single_video_output`，不生成计划。
+
+订阅追更开启 `archive_auto: largest` 后，缺集压缩包可自动完成上述转存、解压及入库，规则见[订阅与周期检查](headless-design.md#订阅与周期检查)。
+
 ## 单个作品目录原地规范命名
 
 ```bash

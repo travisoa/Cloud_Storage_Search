@@ -23,9 +23,21 @@ def add_parser(commands):
     authority.add_argument('--auto-save', action='store_true', default=None)
     authority.add_argument('--no-auto-save', action='store_false', dest='auto_save')
     add.add_argument('--source-url', help='import a canonical source proven by the selected task receipt')
+    add.add_argument('--append-source', action='store_true',
+                     help='add the --source-url source after the recorded ones instead of replacing them')
     add.add_argument('--numeric-source', action='store_true', help='reuse the prior confirmed bare numeric episode mapping in that source directory')
     add.add_argument('--secondary-source', choices=('tmdb', 'tvmaze'))
     add.add_argument('--secondary-id')
+    trust = add.add_mutually_exclusive_group()
+    trust.add_argument('--trust-share-title', action='store_true', default=None,
+                       help="accept a new source's SxxEyy or season-folder file when the share title names the work")
+    trust.add_argument('--no-trust-share-title', action='store_false', dest='trust_share_title')
+    uncertain = add.add_mutually_exclusive_group()
+    uncertain.add_argument('--wait-on-uncertain', action='store_true', default=None, dest='wait_on_uncertain',
+                           help='an uncertain source waits for the next check instead of blocking the subscription')
+    uncertain.add_argument('--block-on-uncertain', action='store_false', dest='wait_on_uncertain')
+    add.add_argument('--archive-auto', choices=('largest', 'off'),
+                     help='largest: fetch, extract and place the largest single-file archive of a missing episode')
     actions.add_parser('list')
     status = actions.add_parser('status')
     status.add_argument('subscription_id')
@@ -96,10 +108,19 @@ def _add(args, config, root, store):
     request, issue, _, _ = _prepare_identity(task['resolved_request'], config)
     if issue:
         return issue
+    if args.append_source and not args.source_url:
+        raise ValueError('--append-source 需要同时指定 --source-url')
     receipt, sources = _receipt_sources(task, args.source_url)
     options = {}
     if sources:
         options['preferred_sources'] = sources
+        options['append_sources'] = bool(args.append_source)
+    if args.trust_share_title is not None:
+        options['trust_share_title'] = args.trust_share_title
+    if args.wait_on_uncertain is not None:
+        options['wait_on_uncertain_source'] = args.wait_on_uncertain
+    if args.archive_auto is not None:
+        options['archive_auto'] = None if args.archive_auto == 'off' else args.archive_auto
     if args.interval_hours is not None:
         options['interval_hours'] = args.interval_hours
     if args.auto_save is not None:

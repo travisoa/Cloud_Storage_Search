@@ -288,6 +288,42 @@ class SubscriptionTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.store.list()
 
+    def test_source_policies_default_off_persist_and_keep_prior_choices(self):
+        record = self.add()
+        self.assertEqual({key: record[key] for key in ("trust_share_title", "wait_on_uncertain_source", "archive_auto")},
+                         {"trust_share_title": False, "wait_on_uncertain_source": False, "archive_auto": None})
+        record = self.add(trust_share_title=True, wait_on_uncertain_source=True, archive_auto="largest")
+        same = self.add(auto_save=True)
+        self.assertEqual({key: same[key] for key in ("trust_share_title", "wait_on_uncertain_source", "archive_auto")},
+                         {"trust_share_title": True, "wait_on_uncertain_source": True, "archive_auto": "largest"})
+        self.assertEqual(self.store.get(record["subscription_id"])["archive_auto"], "largest")
+        self.assertIsNone(self.add(archive_auto=None)["archive_auto"])
+        for options in ({"trust_share_title": "yes"}, {"wait_on_uncertain_source": 1},
+                        {"archive_auto": "all"}, {"archive_auto": True}, {"append_sources": "yes"}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self.add(**options)
+
+    def test_records_written_before_source_policies_still_load(self):
+        record = self.add()
+        data = json.loads(self.path.read_text())
+        for field in ("trust_share_title", "wait_on_uncertain_source", "archive_auto"):
+            data["subscriptions"][record["subscription_id"]].pop(field)
+        self.path.write_text(json.dumps(data))
+        self.assertNotIn("archive_auto", self.store.get(record["subscription_id"]))
+        data["subscriptions"][record["subscription_id"]]["archive_auto"] = "everything"
+        self.path.write_text(json.dumps(data))
+        with self.assertRaises(ValueError):
+            self.store.list()
+
+    def test_append_sources_keeps_recorded_sources_ahead_of_new_ones(self):
+        second = safe_source("https://pan.quark.cn/s/second99", title="白色黑手党时代 DV",
+                             parent_id="dvfolder", path="白色黑手党时代/DV", quality_tags=["2160p"])
+        self.add(preferred_sources=[SOURCE])
+        appended = self.add(preferred_sources=[second, SOURCE], append_sources=True)
+        self.assertEqual(appended["preferred_sources"], [SOURCE, second])
+        replaced = self.add(preferred_sources=[second])
+        self.assertEqual(replaced["preferred_sources"], [second])
+
     def test_unknown_or_filesystem_subscription_ids_are_rejected(self):
         for identifier in ("../elsewhere", "a" * 64, "/tmp/task", None):
             with self.subTest(identifier=identifier), self.assertRaises(ValueError):

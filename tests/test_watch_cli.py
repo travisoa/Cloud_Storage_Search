@@ -140,6 +140,29 @@ class WatchCommandsTests(unittest.TestCase):
         self.assertEqual((code, report["status"]), (1, "FAILED"), report)
         self.assertEqual(self.store.list(), [])
 
+    def test_append_source_keeps_the_recorded_sources(self):
+        earlier = safe_source("https://pan.quark.cn/s/earlier123", title="测试剧 1080P")
+        self.store.add(self.request, preferred_sources=[earlier])
+        appended = self.add("--source-url", URL, "--append-source")
+        self.assertEqual([row["url"] for row in appended["preferred_sources"]], [earlier["url"], URL])
+        replaced = self.add("--source-url", URL)
+        self.assertEqual([row["url"] for row in replaced["preferred_sources"]], [URL])
+        code, report = self.command(["add", "--task-id", self.task["task_id"], "--append-source"])
+        self.assertEqual((code, report["status"]), (1, "FAILED"), report)
+
+    def test_source_policy_flags_are_explicit_and_reversible(self):
+        record = self.add()
+        self.assertEqual((record["trust_share_title"], record["wait_on_uncertain_source"], record["archive_auto"]),
+                         (False, False, None))
+        record = self.add("--trust-share-title", "--wait-on-uncertain", "--archive-auto", "largest")
+        self.assertEqual((record["trust_share_title"], record["wait_on_uncertain_source"], record["archive_auto"]),
+                         (True, True, "largest"))
+        self.assertTrue(self.add()["trust_share_title"])
+        record = self.add("--no-trust-share-title", "--block-on-uncertain", "--archive-auto", "off")
+        self.assertEqual((record["trust_share_title"], record["wait_on_uncertain_source"], record["archive_auto"]),
+                         (False, False, None))
+        self.runner.assert_not_called()
+
     def test_secondary_requires_source_and_id_pair(self):
         for arguments in (["--secondary-source", "tvmaze"], ["--secondary-id", "91309"]):
             with self.subTest(arguments=arguments):
