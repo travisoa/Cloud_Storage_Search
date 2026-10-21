@@ -15,7 +15,7 @@ _RESOLUTIONS = (("4320p", r"4320p|8k"), ("2160p", r"2160p|4k|uhd"),
                 ("576p", r"576p"), ("480p", r"480p"))
 _CODECS = (("HEVC", r"hevc|h[ ._-]?265|x265"), ("H.264", r"avc|h[ ._-]?264|x264"),
            ("AV1", r"av1"))
-_HDR = (("Dolby Vision", r"dolby[ ._-]*vision|dovi|dv"),
+_HDR = (("Dolby Vision", r"dolby[ ._-]*vision|dovi|dv"), ("Dolby Vision", r"杜比视界|杜比視界"),
         ("HDR10+", r"hdr10\+"), ("HDR10", r"hdr10(?!\+)"),
         ("HDR", r"hdr(?!10)"), ("HLG", r"hlg"), ("SDR", r"sdr"))
 _AUDIO_CODECS = (
@@ -49,10 +49,11 @@ def _split_glued(text):
 
 def _labels(value, patterns):
     normalized = _split_glued(unicodedata.normalize("NFKC", str(value)))
+    # Latin labels need word edges; CJK labels such as 4K杜比视界 are glued to them.
     return [{"value": canonical, "label": match.group(0)}
             for canonical, pattern in patterns
-            for match in re.finditer(r"(?<![a-z0-9])(?:" + pattern + r")(?![a-z0-9])",
-                                     normalized, re.I)]
+            for match in re.finditer(r"(?<![a-z0-9])(?:" + pattern + r")(?![a-z0-9])" if pattern.isascii()
+                                     else pattern, normalized, re.I)]
 
 
 def _audio_labels(value):

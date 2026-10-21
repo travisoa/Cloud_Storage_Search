@@ -26,9 +26,17 @@ HEALTHY_STATUSES = frozenset({"UP_TO_DATE", "WAITING", "READY", "COMPLETE"})
 ATTENTION_STATUSES = frozenset({"NEEDS_INPUT", "NEEDS_AUTH", "RISK_CONTROL", "UNKNOWN", "FAILED",
                                 "PARTIAL", "PENDING", "READY_TO_CONTINUE", "READY_TO_RENAME", "NO_RECORD", "METADATA_CONFLICT"})
 SUPPORTED_STATUSES = HEALTHY_STATUSES | ATTENTION_STATUSES
-# Opt-in source policies; an absent field means the strict default.
-SOURCE_SWITCHES = ("trust_share_title", "wait_on_uncertain_source")
+# Opt-in source, archive and upgrade policies; an absent field means the default.
+SOURCE_SWITCHES = ("trust_share_title", "wait_on_uncertain_source", "archive_pick_largest",
+                   "archive_tiebreak_labels", "archive_video_fallback", "upgrade_existing")
 ARCHIVE_AUTO = (None, "largest")
+# What archive_auto leaves behind after a verified extraction; the first is the default.
+ARCHIVE_CLEANUP = ("recycle", "keep", "ask")
+HDR_PREFERENCES = (None, "dv", "hdr")
+UPGRADE_MIN_RATIO = 1.5
+POLICY_DEFAULTS = {**{field: False for field in SOURCE_SWITCHES}, "archive_auto": None,
+                   "archive_cleanup": ARCHIVE_CLEANUP[0], "prefer_hdr_format": None,
+                   "upgrade_min_ratio": UPGRADE_MIN_RATIO}
 _UNSET = object()
 _SECRET = re.compile(r"cookie|auth|token|password|passcode|secret|credential|api[-_]?key|signature|(?:^|_)(?:pwd|sig)(?:$|_)", re.I)
 _ID = re.compile(r"[A-Za-z0-9_-]{1,240}")
@@ -146,6 +154,29 @@ def _numeric_policy(value, request, sources):
         raise ValueError("纯数字集号策略必须绑定已确认来源的真实目录")
     quality = quality_preferences([value["quality"]])[0]
     return {"source_hash": digest, "parent_id": parent, "season": request["season"], "quality": quality}
+
+
+def _policy(field, value):
+    if field in SOURCE_SWITCHES:
+        if type(value) is not bool:
+            raise ValueError("订阅来源策略开关必须为布尔值")
+    elif field == "archive_auto":
+        if value not in ARCHIVE_AUTO:
+            raise ValueError("压缩包自动处理策略只能为 largest 或关闭")
+    elif field == "archive_cleanup":
+        if value not in ARCHIVE_CLEANUP:
+            raise ValueError("压缩包清理方式只能为 recycle、keep 或 ask")
+    elif field == "prefer_hdr_format":
+        if value not in HDR_PREFERENCES:
+            raise ValueError("HDR 格式偏好只能为 dv、hdr 或不设置")
+    elif field == "upgrade_min_ratio":
+        # Below 1.05 an archive and its own extracted video could replace each other.
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or not 1.05 <= value <= 10):
+            raise ValueError("升级体积倍数必须为 1.05–10")
+    else:
+        raise ValueError("不支持的订阅策略：" + str(field))
+    return value
 
 
 def _secondary(value, request):
@@ -340,11 +371,12 @@ class SubscriptionStore:
             for field in ("enabled", "auto_save", "blocked", "needs_attention"):
                 if type(record.get(field)) is not bool:
                     raise ValueError("订阅授权或阻塞状态无效")
-            for field in SOURCE_SWITCHES:
-                if field in record and type(record[field]) is not bool:
-                    raise ValueError("订阅来源策略开关必须为布尔值")
-            if record.get("archive_auto") not in ARCHIVE_AUTO:
-                raise ValueError("订阅压缩包策略无效")
+            for field in POLICY_DEFAULTS:
+                if field in record:
+                    try:
+                        _policy(field, record[field])
+                    except ValueError:
+                        raise ValueError("订阅来源、压缩包或升级策略无效") from None
             hours = record.get("interval_hours")
             if (isinstance(hours, bool) or not isinstance(hours, (int, float))
                     or not math.isfinite(hours) or not 1 <= hours <= 168):
@@ -373,15 +405,18 @@ class SubscriptionStore:
             return deepcopy(record)
 
     def add(self, request, *, preferred_sources=_UNSET, interval_hours=_UNSET, auto_save=_UNSET,
-            numeric_policy=_UNSET, secondary=_UNSET, trust_share_title=_UNSET,
-            wait_on_uncertain_source=_UNSET, archive_auto=_UNSET, append_sources=False):
+            numeric_policy=_UNSET, secondary=_UNSET, append_sources=False, **policies):
         """Create with six-hour checks and no write authority by default.
 
         Re-adding the same identity updates only explicitly supplied options;
         omitted options retain their prior values and never clear a block.
         ``append_sources`` adds the supplied sources after the recorded ones
-        instead of replacing them.
+        instead of replacing them. ``policies`` are the opt-in fields of
+        ``POLICY_DEFAULTS``.
         """
+        unknown = sorted(set(policies) - set(POLICY_DEFAULTS))
+        if unknown:
+            raise TypeError("unsupported subscription policy: " + ", ".join(unknown))
         request = _request(request, self.library_root_id)
         identifier, now = _subscription_id(request), _now().isoformat()
         with self._lock():
@@ -403,19 +438,12 @@ class SubscriptionStore:
                 sources = _sources([*recorded, *preferred_sources] if append_sources else preferred_sources)
             numeric = _numeric_policy(record.get("numeric_policy") if numeric_policy is _UNSET else numeric_policy, request, sources)
             supplement = _secondary(record.get("secondary") if secondary is _UNSET else secondary, request)
-            switches = {}
-            for field, value in zip(SOURCE_SWITCHES, (trust_share_title, wait_on_uncertain_source)):
-                switches[field] = record.get(field, False) if value is _UNSET else value
-                if type(switches[field]) is not bool:
-                    raise ValueError("订阅来源策略开关必须为布尔值")
-            archives = record.get("archive_auto") if archive_auto is _UNSET else archive_auto
-            if archives not in ARCHIVE_AUTO:
-                raise ValueError("压缩包自动处理策略只能为 largest 或关闭")
+            chosen = {field: _policy(field, policies[field] if field in policies else record.get(field, default))
+                      for field, default in POLICY_DEFAULTS.items()}
             request = {**record.get("request", {}), **request}
             record.update(subscription_id=identifier, library_root_id=self.library_root_id, request=request,
                           preferred_sources=sources, interval_hours=hours, auto_save=authorized,
-                          numeric_policy=numeric, secondary=supplement, archive_auto=archives,
-                          updated_at=now, **switches)
+                          numeric_policy=numeric, secondary=supplement, updated_at=now, **chosen)
             record.setdefault("created_at", now)
             record.setdefault("enabled", True)
             record.setdefault("blocked", False)

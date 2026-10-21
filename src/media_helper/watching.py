@@ -7,10 +7,11 @@ import re
 
 from .catalog import parse_file
 from .journal import JobJournal
-from .naming import media_info
+from .naming import episode_filename, media_info
 from .planner import _chinese_integer, _episode_metadata
 from .search import PanSouSearch, PreferredSourceSearch
 from .sources import extract_selected_sources, safe_source
+from .subscriptions import POLICY_DEFAULTS
 from .tasks import TaskStore
 from .updates import UpdatesMetadata, collect_updates
 from . import workflow
@@ -18,6 +19,11 @@ from . import workflow
 
 _SEASON_DIRECTORY = re.compile(r"(?:season[ ._-]*(\d{1,2})|s(\d{1,2})|第\s*([零〇一二两三四五六七八九十\d]{1,3})\s*季)", re.I)
 UNCERTAIN_SOURCE_REASON = 'subscription_source_uncertain_retry_next_cycle'
+# Within this share of the largest size, opted-in label preferences rank first.
+NEAR_SIZE_PERCENT = 3
+_HDR_FORMATS = frozenset({'HDR10+', 'HDR10', 'HDR', 'HLG'})
+_TIERS = ('480p', '576p', '720p', '1080p', '1440p', '2160p', '4320p')
+_HARD_STOPS = frozenset({'NEEDS_AUTH', 'RISK_CONTROL', 'UNKNOWN', 'FAILED', 'PARTIAL'})
 
 
 def _needed(report):
@@ -92,13 +98,22 @@ def _trusted_episode(candidate, season):
     return None, None
 
 
-def select_ready(request, report, subscription):
-    """Numerical episodes are authorized only inside one confirmed source dir.
+def _preferred_rank(subscription, row):
+    preferred = subscription.get('preferred_sources', [])
+    return next((index for index, source in enumerate(preferred)
+                 if source['source_hash'] == row.get('share_source', {}).get('source_hash')
+                 and (not source.get('parent_id') or source['parent_id'] == row.get('parent_id'))), len(preferred))
 
+
+def _authorized(request, report, subscription):
+    """Per missing episode, the candidates the source and episode rules accept.
+
+    Numerical episodes are authorized only inside one confirmed source dir.
     ``trust_share_title`` also accepts a file whose share title (search card or
     share root directory) names the work, whose episode is an explicit SxxEyy
     or follows from one season directory, and which is that share's only
-    candidate for the episode.
+    candidate for the episode. Returns ({key: {candidate_id: (candidate,
+    mapping)}}, episodes whose files could not be authorized).
     """
     needed = _needed(report)
     season = int(request['season'])
@@ -106,10 +121,9 @@ def select_ready(request, report, subscription):
     policy = subscription.get('numeric_policy') or {}
     trust = subscription.get('trust_share_title') is True
     preferred = subscription.get('preferred_sources', [])
+
     def preferred_rank(row):
-        return next((index for index, source in enumerate(preferred)
-                     if source['source_hash'] == row.get('share_source', {}).get('source_hash')
-                     and (not source.get('parent_id') or source['parent_id'] == row.get('parent_id'))), len(preferred))
+        return _preferred_rank(subscription, row)
     grouped, unknown, trusted, per_share = {}, set(), [], Counter()
 
     def hold(candidate):
@@ -168,6 +182,17 @@ def select_ready(request, report, subscription):
             unknown.add(key)
             continue
         grouped.setdefault(key, {})[candidate['candidate_id']] = (candidate, mapping)
+    return grouped, unknown
+
+
+def select_ready(request, report, subscription):
+    """One authorized video per missing episode: the policy's best resolution,
+    then the first preferred source, then the highest score; ties stay open."""
+    version_policy, _ = _filters(request)
+    grouped, unknown = _authorized(request, report, subscription)
+
+    def preferred_rank(row):
+        return _preferred_rank(subscription, row)
     chosen, mappings, ambiguous = {}, {}, []
     for key, values in grouped.items():
         if version_policy is not None:
@@ -220,18 +245,56 @@ def archive_episode(candidate, season):
     return _episode_text(parent, season, bare=False)[0] if parent else None
 
 
+def _info(row):
+    """A candidate's release labels: a video's recorded ones, else its name and folders."""
+    return row.get('media_info') or media_info(row.get('name', ''), posixpath.dirname(row.get('path', '')))
+
+
+def _labelled(subscription):
+    return bool(subscription.get('prefer_hdr_format')) or subscription.get('archive_tiebreak_labels') is True
+
+
+def _preference(subscription, row):
+    """Near-size rank: the preferred HDR format, then DV > HDR > SDR and 高码 > 低码 when opted in."""
+    hdr, rank = _info(row).get('hdr'), []
+    prefer = subscription.get('prefer_hdr_format')
+    if prefer:
+        rank.append(hdr == 'Dolby Vision' if prefer == 'dv' else hdr in _HDR_FORMATS)
+    if subscription.get('archive_tiebreak_labels') is True:
+        text = row.get('path') or row.get('name', '')
+        rank += [3 if hdr == 'Dolby Vision' else 2 if hdr in _HDR_FORMATS else 1,
+                 2 if '高码' in text else 0 if '低码' in text else 1]
+    return rank
+
+
+def _top(rows, subscription):
+    """The largest rows, ties included. Within NEAR_SIZE_PERCENT of the largest,
+    opted-in label preferences rank before size; they never lift a smaller one past it."""
+    largest = max(row['size'] for row in rows)
+    if _labelled(subscription):
+        rows = [row for row in rows if row['size'] * 100 >= largest * (100 - NEAR_SIZE_PERCENT)]
+
+    def rank(row):
+        return (*_preference(subscription, row), row['size'])
+    best = max(map(rank, rows))
+    return [row for row in rows if rank(row) == best]
+
+
 def select_archives(request, report, subscription):
     """``archive_auto: largest`` picks one single-file archive per missing episode.
 
-    The episode follows from the archive's name or directory, the archive is
-    its share's only one for that episode, and it is strictly larger than every
-    other such archive and every eligible video for that episode. Returns the
-    selection and the episodes left uncertain (ties or duplicates).
+    The episode follows from the archive's name or directory, and the archive
+    must outrank every other archive and every eligible video for that episode.
+    By default it is its share's only one for that episode and strictly the
+    largest. ``archive_pick_largest`` lets several archives of one share compete;
+    ``archive_tiebreak_labels`` and ``prefer_hdr_format`` decide within 3% of
+    the largest size. Returns the selection and the episodes left uncertain.
     """
     if subscription.get('archive_auto') != 'largest':
         return {}, []
     needed, season = _needed(report), int(request['season'])
     _, check = _filters(request)
+    pick = subscription.get('archive_pick_largest') is True
     per_share, archives, videos = Counter(), {}, {}
     for item in report.get('archive_candidates', []):
         classification = item.get('classification') or {}
@@ -252,20 +315,20 @@ def select_archives(request, report, subscription):
             key = _key(season, candidate['suggested_episode'])
         if (key in archives and type(candidate.get('size')) is int and candidate['size'] > 0
                 and check(candidate.get('media_info', {}), candidate['size'],
-                          candidate.get('name', ''), candidate.get('path', '')) is not None):
-            videos[key] = max(videos.get(key, 0), candidate['size'])
+                          candidate.get('name', ''), candidate.get('path', '')) is not None
+                and candidate['size'] > videos.get(key, {}).get('size', 0)):
+            videos[key] = candidate
     selected, uncertain = {}, []
     for key, items in sorted(archives.items()):
-        if max(item['size'] for item in items) <= videos.get(key, 0):
-            continue  # A video at least as large keeps the ordinary path.
-        unique = [item for item in items
-                  if per_share[(item.get('share_source', {}).get('source_hash'), key)] == 1]
-        largest = max((item['size'] for item in unique), default=0)
-        top = [item for item in unique if item['size'] == largest]
-        if len(top) != 1 or largest <= max([videos.get(key, 0), *(item['size'] for item in items if item not in unique)]):
-            uncertain.append(key)
+        video = videos.get(key)
+        top = _top([*items, *([video] if video else [])], subscription)
+        if any(row is video for row in top):
+            continue  # A video at least as good keeps the ordinary path.
+        winner = top[0]
+        if len(top) == 1 and (pick or per_share[(winner.get('share_source', {}).get('source_hash'), key)] == 1):
+            selected[key] = winner
         else:
-            selected[key] = top[0]
+            uncertain.append(key)  # Tied, or a duplicate within its share.
     return selected, uncertain
 
 
@@ -281,6 +344,177 @@ def _archive_source(report, item):
             except (ValueError, TypeError):
                 return None
     return None
+
+
+def _tier(info, order):
+    """Higher is better, by the version policy's resolution order when there is one.
+    A known resolution outside that order ranks below it; no label is None."""
+    resolution = (info or {}).get('resolution')
+    if resolution not in _TIERS:
+        return None
+    return len(order) - order.index(resolution) if resolution in order else 0
+
+
+def select_upgrades(request, report, subscription, *, exclude=()):
+    """``upgrade_existing``: existing episodes that have a clearly better version.
+
+    An episode qualifies when the season folder holds exactly one sized video for
+    it. Its best authorized candidate is the archive ``archive_auto`` would pick,
+    else the authorized video with the highest resolution tier and then the
+    largest size (near-size label preferences apply). It replaces the old file
+    when its tier is higher, or the same (or the old one unlabelled) with at
+    least ``upgrade_min_ratio`` times the size. A candidate without a resolution
+    label, or with a lower one, never replaces anything. Preferred sources give
+    no priority here: a better version may come from any authorized share.
+    """
+    destination = report.get('target_folder_id')
+    if subscription.get('upgrade_existing') is not True or not destination:
+        return {}
+    ratio = subscription.get('upgrade_min_ratio', POLICY_DEFAULTS['upgrade_min_ratio'])
+    version_policy, _ = _filters(request)
+    order = version_policy['resolution_order'] if version_policy else list(reversed(_TIERS))
+    olds = {}
+    for row in report.get('existing', []):
+        files = row.get('files') or []
+        if (row.get('episode_key') and row['episode_key'] not in exclude and len(files) == 1
+                and str(files[0].get('parent_id', '')) == str(destination)
+                and type(files[0].get('size')) is int and files[0]['size'] > 0):
+            olds[row['episode_key']] = files[0]
+    if not olds:
+        return {}
+    view = {**report, 'missing': [{'episode_key': key} for key in olds]}
+    grouped, _ = _authorized(request, view, subscription)
+    archives, _ = select_archives(request, view, subscription)
+    plan = {}
+    for key, old in sorted(olds.items()):
+        mapping = None
+        if key in archives:
+            kind, item = 'archive', archives[key]
+        else:
+            rows = {candidate['candidate_id']: (candidate, value) for candidate, value in grouped.get(key, {}).values()
+                    if _tier(_info(candidate), order) is not None}
+            if not rows:
+                continue
+            best = max(_tier(_info(candidate), order) for candidate, _ in rows.values())
+            top = _top([candidate for candidate, _ in rows.values() if _tier(_info(candidate), order) == best],
+                       subscription)
+            if len(top) != 1:
+                continue
+            kind, (item, mapping) = 'video', rows[top[0]['candidate_id']]
+        new = _tier(_info(item), order)
+        current = _tier(media_info(workflow._name(old), posixpath.dirname(old.get('path', ''))), order)
+        if new is None or (current is not None and new < current):
+            continue
+        higher = current is not None and new > current
+        if not higher and item['size'] < ratio * old['size']:
+            continue
+        plan[key] = {'kind': kind, 'candidate': item, 'mapping': mapping,
+                     'old': {'fid': workflow._fid(old), 'name': workflow._name(old), 'size': old['size'],
+                             'parent_id': str(old['parent_id'])},
+                     'basis': 'higher_resolution' if higher else 'larger_size'}
+    return plan
+
+
+def _upgrade_row(key, entry, **extra):
+    item = entry['candidate']
+    return {'episode_key': key, 'kind': entry['kind'], 'basis': entry['basis'], 'candidate_id': item['candidate_id'],
+            'name': item['name'], 'size': item['size'], 'path': item.get('path', ''),
+            'old': deepcopy(entry['old']), **extra}
+
+
+def _apply_upgrades(subscription, request, survey, *, storage, root, config, journal, search, metadata_for,
+                    exclude=(), allow_write=False, record=None):
+    """Plan, and with authority save, this cycle's upgrades of existing episodes.
+
+    Only the season folder is read. An upgrade whose target name is already
+    taken, or that stops before sending any write, is skipped and never blocks
+    the subscription. Once a write was sent, a result short of COMPLETE (old
+    version not yet recycled included) becomes the cycle's status.
+    """
+    outcome = {'status': 'COMPLETE', 'reasons': [], 'upgrade_plan': [], 'upgrade_skipped': [], 'upgrades': [],
+               'new_files': [], 'sources': [], 'writes_attempted': False, 'writes_performed': False}
+    plan = select_upgrades(request, survey, subscription, exclude=exclude)
+    if not plan:
+        return outcome
+    destination = str(survey['target_folder_id'])
+    names = [workflow._name(row).casefold() for row in workflow._list(storage, destination)]
+    season, tags = int(request['season']), request.get('include_media_tags', True)
+    for key, entry in sorted(plan.items()):
+        item = entry['candidate']
+        if entry['kind'] == 'video':
+            target = episode_filename(survey['naming_prefix'], season, int(key[4:]),
+                                      posixpath.splitext(item['name'])[1], _info(item), tags)
+            taken = target.casefold() in names or item['name'].casefold() in names
+        else:
+            # The extracted video's extension is unknown yet: compare stems.
+            extension, stem = (item.get('classification') or {}).get('format') or '', item['name']
+            if extension and stem.casefold().endswith('.' + extension):
+                stem = stem[:-len(extension) - 1]
+            target = posixpath.splitext(episode_filename(survey['naming_prefix'], season, int(key[4:]), '.mkv',
+                                        media_info(stem, posixpath.dirname(item.get('path', ''))), tags))[0]
+            taken = any(posixpath.splitext(name)[0] == target.casefold() for name in names)
+        if taken:
+            outcome['upgrade_skipped'].append(_upgrade_row(key, plan.pop(key), reason='upgrade_target_name_exists'))
+        else:
+            outcome['upgrade_plan'].append(_upgrade_row(key, entry, target_name=target))
+    if not allow_write or not plan:
+        return outcome
+    if record is not None:
+        record(deepcopy(outcome['upgrade_plan']))
+
+    def merge(step):
+        for flag in ('writes_attempted', 'writes_performed'):
+            outcome[flag] = outcome[flag] or bool(step.get(flag))
+
+    def stop(step, keys):
+        if not step.get('writes_attempted'):
+            # Nothing was sent: the old version stays and the next cycle looks again.
+            reason = (step.get('reasons') or ['upgrade_not_started'])[-1]
+            outcome['upgrade_skipped'] += [_upgrade_row(key, plan[key], reason=reason) for key in keys]
+            return False
+        outcome.update(status=step['status'], failure=step)
+        return True
+
+    videos = {key: entry for key, entry in plan.items() if entry['kind'] == 'video'}
+    if videos:
+        upgrade_request = deepcopy(request)
+        upgrade_request.update(
+            source_selection={key: entry['candidate']['candidate_id'] for key, entry in videos.items()},
+            source_episode_mapping={entry['candidate']['candidate_id']: entry['mapping']
+                                    for entry in videos.values() if entry['mapping']},
+            replace_episodes=sorted(videos), remove_replaced=True)
+        saved = workflow.run(upgrade_request, storage, metadata_for(videos), search, journal, apply=True)
+        merge(saved)
+        if saved['status'] == 'COMPLETE':
+            states = {row['episode_key']: row.get('state') for row in saved.get('replacements', [])}
+            outcome['upgrades'] += [_upgrade_row(key, entry, old_state=states.get(key)) for key, entry in sorted(videos.items())]
+            outcome['new_files'] += _new_files(saved)
+            outcome['sources'] += extract_selected_sources(saved)
+        elif stop(saved, sorted(videos)):
+            return outcome
+    from .archive_episodes import save_archive_episode
+    cleanup = subscription.get('archive_cleanup', POLICY_DEFAULTS['archive_cleanup'])
+    for key, entry in sorted(plan.items()):
+        if entry['kind'] != 'archive':
+            continue
+        source = _archive_source(survey, entry['candidate'])
+        if source is None:
+            outcome['upgrade_skipped'].append(_upgrade_row(key, entry, reason='archive_source_unavailable'))
+            continue
+        result = save_archive_episode(storage, root, config, candidate=entry['candidate'], source=source,
+                                      episode_key=key, prefix=survey['naming_prefix'], destination=destination,
+                                      include_media_tags=tags, cleanup=cleanup, replacing=entry['old'])
+        merge(result)
+        if result['status'] == 'COMPLETE':
+            outcome['upgrades'].append(_upgrade_row(key, entry, old_state=result['replaced']['state'],
+                                                    archive=result))
+            outcome['new_files'] += result['new_files']
+            outcome['sources'].append(source)
+            outcome['reasons'] += result.get('reasons', [])
+        elif stop(result, [key]):
+            outcome['upgrades'].append(_upgrade_row(key, entry, archive=result))
+            return outcome
+    return outcome
 
 
 class _NoSearch:
@@ -371,25 +605,88 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
                 pre = workflow.run(request, storage, metadata, search, journal, apply=False)
             else:
                 return finish(checked)
-        if pre['status'] in {'NEEDS_AUTH', 'RISK_CONTROL', 'UNKNOWN', 'FAILED', 'PARTIAL'}:
+        if pre['status'] in _HARD_STOPS:
             return finish(pre)
+        cleanup = subscription.get('archive_cleanup', POLICY_DEFAULTS['archive_cleanup'])
+        wide = PreferredSourceSearch(preferred, fallback, include_fallback=True)
+
+        def metadata_for(keys):
+            rows = [row for row in update_report['episodes'] if row.get('episode_key') in keys]
+            return UpdatesMetadata(primary, rows, update_report['series'])
+
+        def remember(field, value):
+            # The task records each decision before the writes that follow it.
+            task.setdefault('subscription_decision', {'basis': 'persisted_subscription_source_and_episode_policy'})
+            task['subscription_decision'][field] = value
+            store.save(task)
+
+        def close(report, *, survey=None, saved=()):
+            """After a healthy missing-episode phase, upgrade existing episodes, then finish."""
+            if (subscription.get('upgrade_existing') is not True
+                    or report['status'] not in {'UP_TO_DATE', 'WAITING', 'READY', 'COMPLETE'}):
+                return finish(report)
+            if survey is None:
+                survey = workflow.run(request, storage, metadata, wide, journal, apply=False, survey_existing=True)
+            if survey['status'] in _HARD_STOPS:
+                if survey['status'] in {'NEEDS_AUTH', 'RISK_CONTROL'}:
+                    return finish({**report, **{key: survey[key] for key in ('status', 'reasons', 'error') if key in survey}})
+                return finish({**report, 'reasons': [*report.get('reasons', []), 'upgrade_check_unavailable']})
+            outcome = _apply_upgrades(subscription, request, survey, storage=storage, root=root, config=config,
+                                      journal=journal, search=wide, metadata_for=metadata_for, exclude=set(saved),
+                                      allow_write=allow_write,
+                                      record=lambda rows: remember('upgrade_selection', rows))
+            result = {**report, 'new_files': [*report.get('new_files', []), *outcome['new_files']]}
+            for flag in ('writes_attempted', 'writes_performed'):
+                result[flag] = bool(report.get(flag)) or outcome[flag]
+            for field in ('upgrade_plan', 'upgrade_skipped', 'upgrades'):
+                if outcome[field]:
+                    result[field] = outcome[field]
+            reasons = [*report.get('reasons', []), *outcome['reasons']]
+            if outcome['upgrade_skipped']:
+                reasons.append('existing_episode_upgrade_skipped')
+            if 'failure' in outcome:
+                failure = outcome['failure']
+                result['status'] = failure['status']
+                reasons += failure.get('reasons', [])
+                for key in ('error', 'operations', 'replacements'):
+                    if key in failure:
+                        result[key] = failure[key]
+            elif outcome['upgrades']:
+                result['status'] = 'COMPLETE' if result['status'] == 'UP_TO_DATE' else result['status']
+                reasons.append('existing_episodes_upgraded')
+                combined = result.get('preferred_sources', preferred) + outcome['sources']
+                result['preferred_sources'] = list({(row['source_hash'], row.get('parent_id'), row.get('path')): row
+                                                     for row in combined}.values())
+            if reasons:
+                result['reasons'] = list(dict.fromkeys(reasons))
+            return finish(result)
+
         if pre['status'] == 'UP_TO_DATE':
-            return finish({**pre, 'source_strategy': 'no_missing_episodes'})
+            return close({**pre, 'source_strategy': 'no_missing_episodes'})
         if not _needed(pre):
-            return finish(pre)
+            return close(pre)
         chosen, mappings, ambiguous = select_ready(request, pre, subscription)
         used_fallback = not bool(preferred)
         if preferred and len(chosen) < len(_needed(pre)) and not ambiguous:
-            search = PreferredSourceSearch(preferred, fallback, include_fallback=True)
+            search = wide
             pre = workflow.run(request, storage, metadata, search, journal, apply=False)
-            if pre['status'] in {'NEEDS_AUTH', 'RISK_CONTROL', 'UNKNOWN', 'FAILED', 'PARTIAL'}:
+            if pre['status'] in _HARD_STOPS:
                 return finish(pre)
             chosen, mappings, ambiguous = select_ready(request, pre, subscription)
             used_fallback = True
         pre['source_strategy'] = 'preferred_then_search' if used_fallback else 'preferred_source'
+        # A survey that already included the wider search is reused by the upgrade check.
+        listed = pre if used_fallback else None
         archives, uncertain = select_archives(request, pre, subscription)
-        for key in [*archives, *uncertain]:
-            # A larger archive outranks the video; a tied one leaves the episode open.
+        apart = subscription.get('archive_video_fallback') is True
+        reserve = {}
+        for key in archives:
+            # A winning archive outranks the video, which stays in reserve when kept apart.
+            identifier = chosen.pop(key, None)
+            if identifier:
+                reserve[key] = (identifier, mappings.pop(identifier, None))
+        for key in () if apart else uncertain:
+            # By default an uncertain archive also leaves the episode's video open.
             mappings.pop(chosen.pop(key, None), None)
         ambiguous = sorted((set(ambiguous) | set(uncertain)) - set(archives) - set(chosen))
         if ambiguous and subscription.get('wait_on_uncertain_source') is not True:
@@ -407,13 +704,12 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
                        ['expected_episode_has_no_confirmed_matching_resource'])
             if ambiguous:
                 pre['ambiguous_episodes'] = ambiguous
-            return finish(pre)
+            return close(pre, survey=listed)
         ready_request = deepcopy(request)
         ready_request.update(source_selection=chosen, source_episode_mapping=mappings)
         # Missing episodes without files remain pending in the final report.
         # A verified available subset may be saved without calling it complete.
-        ready_rows = [row for row in update_report['episodes'] if row.get('episode_key') in chosen]
-        ready_metadata = UpdatesMetadata(primary, ready_rows, update_report['series'])
+        ready_metadata = metadata_for(chosen)
         if chosen:
             planned = workflow.run(ready_request, storage, ready_metadata, search, journal, apply=False)
         else:
@@ -430,7 +726,7 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
         if planned['status'] != 'READY':
             return finish(planned)
         if not allow_write:
-            return finish(planned)
+            return close(planned, survey=listed)
         task['resolved_request'] = ready_request
         task['execution_request'] = ready_request
         task['subscription_decision'] = {'basis': 'persisted_subscription_source_and_episode_policy',
@@ -446,6 +742,7 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
                 return finish(saved)
             new_files, sources = _new_files(saved), extract_selected_sources(saved)
             writes = {flag: saved.get(flag, False) for flag in writes}
+        retry = {}
         if archives:
             from .archive_episodes import save_archive_episode
             destination = (saved or {}).get('target_folder_id') or pre.get('target_folder_id')
@@ -453,18 +750,34 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
                 source = _archive_source(pre, item)
                 result = (save_archive_episode(storage, root, config, candidate=item, source=source, episode_key=key,
                                                prefix=pre['naming_prefix'], destination=destination,
-                                               include_media_tags=request.get('include_media_tags', True))
+                                               include_media_tags=request.get('include_media_tags', True),
+                                               cleanup=cleanup)
                           if source and destination else
                           {'status': 'NEEDS_INPUT', 'episode_key': key, 'new_files': [],
                            'reasons': ['archive_source_or_destination_unavailable']})
                 archive_results.append(result)
                 writes = {flag: writes[flag] or bool(result.get(flag)) for flag in writes}
                 if result['status'] != 'COMPLETE':
+                    if apart and result['status'] == 'NEEDS_INPUT' and key in reserve:
+                        retry[key] = reserve[key]  # A known, unusable archive leaves its video.
+                        continue
                     return finish({**(saved or pre), **writes, 'status': result['status'],
                                    'reasons': result.get('reasons', []), 'new_files': new_files,
                                    'archive_episodes': archive_results, 'source_strategy': pre['source_strategy']})
                 new_files = [*new_files, *result['new_files']]
                 sources.append(source)
+        if retry:
+            remember('video_fallback_selection', {key: value[0] for key, value in retry.items()})
+            fallback_request = deepcopy(request)
+            fallback_request.update(source_selection={key: value[0] for key, value in retry.items()},
+                                    source_episode_mapping={value[0]: value[1] for value in retry.values() if value[1]})
+            second = workflow.run(fallback_request, storage, metadata_for(retry), search, journal, apply=True)
+            writes = {flag: writes[flag] or bool(second.get(flag)) for flag in writes}
+            if second['status'] not in {'COMPLETE', 'UP_TO_DATE'}:
+                return finish({**second, **writes, 'new_files': [*new_files, *_new_files(second)],
+                               'archive_episodes': archive_results, 'source_strategy': pre['source_strategy']})
+            saved = saved or second
+            new_files, sources = [*new_files, *_new_files(second)], [*sources, *extract_selected_sources(second)]
         # Read the full season inventory without another resource search.
         after = workflow.run(request, storage, metadata, _NoSearch(), journal, apply=False)
         pending_only = (after['status'] == 'NEEDS_INPUT' and set(after.get('reasons', [])) ==
@@ -480,6 +793,9 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
         if archive_results:
             result['archive_episodes'] = archive_results
             reasons += [reason for row in archive_results for reason in row.get('reasons', [])]
+        if retry:
+            result['video_fallback_episodes'] = sorted(retry)
+            reasons.append('archive_unusable_saved_video_instead')
         if ambiguous:
             result['ambiguous_episodes'] = ambiguous
             reasons.append(UNCERTAIN_SOURCE_REASON)
@@ -489,7 +805,7 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
         combined = preferred + sources
         result['preferred_sources'] = list({(row['source_hash'], row.get('parent_id'), row.get('path')): row
                                              for row in combined}.values())
-        return finish(result)
+        return close(result, saved={*chosen, *archives, *retry})
     except Exception as exc:
         from .providers import AuthenticationError, RiskControlError, UnknownOutcome
         failure = _safe_failure(exc)

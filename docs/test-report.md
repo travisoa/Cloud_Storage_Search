@@ -100,13 +100,15 @@ PYTHONPATH=src python3 -m unittest discover -s tests
 
 2026-10-21 订阅来源策略新增模拟测试后，全套842项通过：`trust_share_title` 的分享标题、季目录与同分享唯一性判定，`wait_on_uncertain_source` 不阻断且仍保存已确定集，成功来源追加及 `--append-source`，`archive_auto: largest` 的集号来源、并列/重复/画质/分卷排除、只读计划、转存→解压→改名→移入季目录、多视频停止、未知移动不重发、季目录缺失等待及三种清理设置，以及 `archive plan --season/--episode`。以上均未在真实订阅或云盘执行。
 
+2026-10-21 压缩包择优与升级新增模拟测试后，全套884项通过：同一分享每集三个压缩包外加1080p mp4 的真实结构回归（默认仍不确定；`archive_pick_largest` 取最大包并回收残留；并列时 `archive_video_fallback` 改存 mp4；mp4 更大时走视频；包内多视频时同轮退回 mp4；移动结果未知不退回），3% 内 DV/HDR/SDR、高码/低码与 `prefer_hdr_format` 排序及超过 3% 仍取最大，`upgrade_existing` 的分辨率等级、体积倍数、版本策略顺序、唯一旧文件与本季目录、目标同名跳过、只读计划、视频与压缩包升级（新文件读回后才回收旧 fid）、旧文件被改动时保留、回收结果未知不重发，订阅级 `archive_cleanup` 默认 `recycle`，以及“杜比视界”标签。以上均未在真实订阅或云盘执行。
+
 ## 尚未验证的边界
 
 - 《白色黑手党时代》真实转存及改名已验收；真实空间不足、风控、转存中断和改名中断未主动触发，这些边界仍以模拟测试为依据。
 - 未做 Infuse 播放或刮削测试，原连接保持不变。
 - TMDB与TVmaze均已真实只读使用；普通网络故障保留降级证据，不保证任一服务持续可用。
 - 6小时心跳已启用；首次定时触发和未来新集的自动转存尚未实际发生，不将模拟通过称为该路径已完成真实转存。
-- 订阅 `trust_share_title`、`wait_on_uncertain_source`、`archive_auto` 及 `archive plan --season/--episode` 仅通过模拟验证，现有订阅未开启，真实分享标题和压缩包自动入库尚未执行。
+- 订阅 `trust_share_title`、`wait_on_uncertain_source`、`archive_auto`（含 `archive_pick_largest`、`archive_tiebreak_labels`、`archive_video_fallback`、`prefer_hdr_format`）、`upgrade_existing` 及 `archive plan --season/--episode` 仅通过模拟验证，现有订阅未开启，真实分享标题、压缩包自动入库和已有集升级替换尚未执行。
 - 压缩包云解压尚未用真实包验收；密码和分卷自动解压暂不支持。解压后原包及暂存目录回收（`archive_cleanup`、`archive cleanup`）仅通过模拟验证，尚未真实执行。账号会员权益及实际支持格式需对用户明确选中的包核验，模拟通过不表示云端任务已执行。
 
 用户后续明确要求保存时，后台可在已确认范围内执行；歧义、冲突、风控或未知写入结果会保留证据并停止，不需要网页审批。

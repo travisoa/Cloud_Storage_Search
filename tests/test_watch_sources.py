@@ -139,12 +139,14 @@ class Drive:
         self.shares, self.dead, self.outputs = {}, set(), {}
         self.saved, self.renamed, self.moved, self.trashed, self.extracted = [], [], [], [], []
         self.move_failure = None
+        self.trash_failures, self.listed = set(), []
         self.tasks = {}
 
     def find(self, fid):
         return next((parent, row) for parent, rows in self.folders.items() for row in rows if row["fid"] == fid)
 
     def list_files(self, parent):
+        self.listed.append(parent)
         return deepcopy(self.folders[parent])
 
     def share_files(self, url, password=None, parent_id="0"):
@@ -184,6 +186,8 @@ class Drive:
 
     def trash(self, fid):
         self.trashed.append(fid)
+        if fid in self.trash_failures:
+            raise RuntimeError("timeout after request")
         old, row = self.find(fid)
         self.folders[old].remove(row)
         return {"fid": fid, "status": "submitted"}
@@ -332,7 +336,8 @@ class ArchiveCycleTests(CycleCase):
         self.assertEqual(self.drive.extracted, [])
 
     def test_archive_is_fetched_extracted_renamed_and_moved_into_the_season(self):
-        self.config["archive_cleanup"] = "recycle"
+        # Subscriptions recycle leftovers by default; the manual commands' setting does not apply.
+        self.config["archive_cleanup"] = "keep"
         report = self.cycle(self.sub())
         self.assertEqual(report["status"], "COMPLETE", report)
         target = "测试剧 (2026)S01E02_2160P_DV"
@@ -351,7 +356,6 @@ class ArchiveCycleTests(CycleCase):
         self.assertEqual((len(self.drive.saved), len(self.drive.extracted)), (1, 1))
 
     def test_unplaced_leftovers_keep_the_extraction_folder(self):
-        self.config["archive_cleanup"] = "recycle"
         self.drive.outputs["02.zip"].append(("说明.txt", 1))
         report = self.cycle(self.sub())
         self.assertEqual(report["status"], "COMPLETE", report)
@@ -361,14 +365,14 @@ class ArchiveCycleTests(CycleCase):
         self.assertEqual(len(self.drive.trashed), 2)
 
     def test_keep_setting_leaves_the_temporary_folders(self):
-        report = self.cycle(self.sub())
+        self.config["archive_cleanup"] = "recycle"
+        report = self.cycle(self.sub(archive_cleanup="keep"))
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertEqual(self.drive.trashed, [])
         self.assertEqual(len(self.drive.folders["root"]), 3)
 
     def test_ask_setting_reports_the_cleanup_choice(self):
-        self.config["archive_cleanup"] = "ask"
-        report = self.cycle(self.sub())
+        report = self.cycle(self.sub(archive_cleanup="ask"))
         self.assertEqual(report["status"], "COMPLETE", report)
         self.assertIn("archive_cleanup_awaiting_choice", report["reasons"])
         cleanup = report["archive_episodes"][0]["cleanup"]

@@ -13,6 +13,19 @@ from .tasks import TaskStore
 from .workflow import _digest
 
 
+# (subscription field, enabling flag, disabling flag, help) for the boolean policies.
+SWITCH_FLAGS = (
+    ('archive_pick_largest', '--archive-pick-largest', '--no-archive-pick-largest',
+     "several archives of one episode in one share: take the largest instead of waiting"),
+    ('archive_tiebreak_labels', '--archive-tiebreak-labels', '--no-archive-tiebreak-labels',
+     'within 3%% of the largest size, rank DV > HDR > SDR, then 高码 > 低码 from folder labels'),
+    ('archive_video_fallback', '--archive-video-fallback', '--no-archive-video-fallback',
+     "judge archives apart from videos: an uncertain or unusable archive keeps the episode's video"),
+    ('upgrade_existing', '--upgrade-existing', '--no-upgrade-existing',
+     'replace an existing episode by a higher-resolution or clearly larger version, recycling the old file'),
+)
+
+
 def add_parser(commands):
     watch = commands.add_parser('watch', help='manage approved TV subscriptions without a browser')
     actions = watch.add_subparsers(dest='watch_action', required=True)
@@ -38,6 +51,16 @@ def add_parser(commands):
     uncertain.add_argument('--block-on-uncertain', action='store_false', dest='wait_on_uncertain')
     add.add_argument('--archive-auto', choices=('largest', 'off'),
                      help='largest: fetch, extract and place the largest single-file archive of a missing episode')
+    for field, on, off, text in SWITCH_FLAGS:
+        group = add.add_mutually_exclusive_group()
+        group.add_argument(on, action='store_true', default=None, dest=field, help=text)
+        group.add_argument(off, action='store_false', dest=field)
+    add.add_argument('--archive-cleanup', choices=('recycle', 'keep', 'ask'),
+                     help='what archive_auto leaves after extraction (default recycle; never emptied or deleted)')
+    add.add_argument('--prefer-hdr-format', choices=('dv', 'hdr', 'none'),
+                     help='within 3%% of the largest size, prefer this HDR format')
+    add.add_argument('--upgrade-min-ratio', type=float,
+                     help='same-resolution upgrades need this many times the old size (default 1.5)')
     actions.add_parser('list')
     status = actions.add_parser('status')
     status.add_argument('subscription_id')
@@ -121,6 +144,15 @@ def _add(args, config, root, store):
         options['wait_on_uncertain_source'] = args.wait_on_uncertain
     if args.archive_auto is not None:
         options['archive_auto'] = None if args.archive_auto == 'off' else args.archive_auto
+    for field, *_ in SWITCH_FLAGS:
+        if getattr(args, field) is not None:
+            options[field] = getattr(args, field)
+    if args.archive_cleanup is not None:
+        options['archive_cleanup'] = args.archive_cleanup
+    if args.prefer_hdr_format is not None:
+        options['prefer_hdr_format'] = None if args.prefer_hdr_format == 'none' else args.prefer_hdr_format
+    if args.upgrade_min_ratio is not None:
+        options['upgrade_min_ratio'] = args.upgrade_min_ratio
     if args.interval_hours is not None:
         options['interval_hours'] = args.interval_hours
     if args.auto_save is not None:

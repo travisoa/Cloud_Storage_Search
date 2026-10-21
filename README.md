@@ -23,7 +23,7 @@
 
 运行环境为 Python 3.11+，以及可用的 Apple Container（macOS）、Docker 或 Podman。引用 AList 凭据还要求当前 Python 的 SQLite 构建支持 `sqlite3.Connection.deserialize`；程序会在读取前检测此能力。Python 模块仅依赖标准库；容器运行时用于 PanSou 搜索服务。
 
-1. 从 [config/headless.example.json](config/headless.example.json) 创建本地 `config/headless.json`；已有配置应保留。填写真实影库根目录及分类目录 ID，目录 ID 与 AList 展示路径不能混用。`archive_cleanup` 决定解压后原压缩包及清空的暂存目录保留（`keep`）、移入回收站（`recycle`）或每次询问（`ask`），见[压缩包检查与隔离解压](docs/media-maintenance.md#压缩包检查与隔离解压)。
+1. 从 [config/headless.example.json](config/headless.example.json) 创建本地 `config/headless.json`；已有配置应保留。填写真实影库根目录及分类目录 ID，目录 ID 与 AList 展示路径不能混用。`archive_cleanup` 决定手动解压后原压缩包及清空的暂存目录保留（`keep`）、移入回收站（`recycle`）或每次询问（`ask`），见[压缩包检查与隔离解压](docs/media-maintenance.md#压缩包检查与隔离解压)；订阅自动解压使用订阅自己的设置，默认 `recycle`。
 2. 配置夸克凭据。使用私有 Cookie 文件时执行 `configure-quark`；引用已有 AList 挂载时改用 `configure-alist --storage-id N`，两种方式择一。
 3. 使用电影功能或 TMDB 元数据时配置 TMDB 令牌，然后启动搜索服务并执行只读自检。
 

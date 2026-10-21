@@ -5,7 +5,9 @@ archive pipeline: ``archive_flow.fetch`` into its own staging folder, then the
 isolated ``archives.extract``. The single extracted video (and subtitles named
 after it) is renamed inside that extraction folder and moved into the existing
 season folder. Every write intent is journaled before its request; a pending
-intent is only observed, never resent. Leftovers follow ``archive_cleanup``.
+intent is only observed, never resent. An upgrade replaces one existing video:
+the old file goes to the recycle bin only after the new one is read back in the
+season folder. Leftovers follow the subscription's ``archive_cleanup``.
 """
 from __future__ import annotations
 
@@ -13,7 +15,7 @@ from copy import deepcopy
 import posixpath
 import re
 
-from .archive_cli import CLEANUP_KEY, _fetch_staging, _fetched_archive_recycled, _job_key
+from .archive_cli import _fetch_staging, _fetched_archive_recycled, _job_key
 from .archive_flow import fetch
 from .archives import SOURCE_ACTIONS, _Stop, _account, _inventory, _listing, cleanup_extraction, extract
 from .catalog import build_episode_inventory, parse_file
@@ -23,7 +25,8 @@ from .planner import SUBTITLE_EXTENSIONS, _subtitle_suffix
 from .providers import AuthenticationError, RiskControlError
 
 
-_PENDING = {"rename_intent", "rename_returned", "move_intent", "move_returned"}
+_PENDING = {"rename_intent", "rename_returned", "move_intent", "move_returned", "recycle_intent", "recycle_returned"}
+_RETIRED = {"recycled", "absent"}
 
 
 def _fold(value):
@@ -93,7 +96,7 @@ def _plan(storage, *, folder, archive, episode_key, prefix, include_media_tags):
     return files
 
 
-def _place(storage, journal, key, state, *, destination, episode_key, report):
+def _place(storage, journal, key, state, *, destination, episode_key, report, replacing=None):
     """Rename inside the isolated folder, then move into the season folder."""
     season = int(episode_key[1:3])
 
@@ -107,8 +110,11 @@ def _place(storage, journal, key, state, *, destination, episode_key, report):
             raise _Stop("NEEDS_INPUT", "archive_target_name_conflict")
         if item["kind"] == "video":
             present = build_episode_inventory([row for row in rows if not row["is_dir"]], season=season)
-            if episode_key in present["existing"]:
+            current = [row["fid"] for row in present["existing"].get(episode_key, [])]
+            if replacing is None and current:
                 raise _Stop("NEEDS_INPUT", "episode_appeared_before_save")
+            if replacing is not None and current != [replacing["fid"]]:
+                raise _Stop("NEEDS_INPUT", "upgraded_episode_changed_before_save")
 
     for item in state["files"]:
         source, sent = item["source"], False
@@ -165,13 +171,71 @@ def _place(storage, journal, key, state, *, destination, episode_key, report):
                 raise _Stop("NEEDS_INPUT", "invalid_archive_placement_state")
 
 
+def _retire(storage, journal, key, state, *, destination, report):
+    """Recycle the replaced video once its successor is read back in the season folder."""
+    entry = state["replaced"]
+
+    def save():
+        journal.put(key, state)
+
+    def gone():
+        return _observe(storage, destination, entry["old"]["fid"]) is None
+
+    if entry["state"] in _RETIRED | {"kept"}:
+        return
+    if entry["state"] in {"recycle_intent", "recycle_returned"}:
+        # A request may have been sent: observe only, never send it again.
+        if not _settled(storage, gone, False):
+            raise _Stop("UNKNOWN", "replaced_episode_recycle_outcome_unknown")
+        entry["state"] = "recycled"
+        save()
+        return
+    video = next(item for item in state["files"] if item["kind"] == "video")
+    new = _observe(storage, destination, video["source"]["fid"])
+    if not new or new["name"] != video["target_name"] or new["size"] != video["source"]["size"]:
+        raise _Stop("NEEDS_INPUT", "upgraded_episode_not_verified_old_version_kept")
+    old = _observe(storage, destination, entry["old"]["fid"])
+    if old is None:
+        entry["state"] = "absent"  # Already gone: nothing is sent.
+        save()
+        return
+    if old["is_dir"] or {field: old[field] for field in entry["old"]} != entry["old"]:
+        entry.update(state="kept", reason="old_version_changed")
+        save()
+        report["reasons"].append(entry["reason"])
+        return
+    if not getattr(storage, "capabilities", {}).get("trash"):
+        entry.update(state="kept", reason="old_version_kept_trash_api_not_available")
+        save()
+        report["reasons"].append(entry["reason"])
+        return
+    entry["state"] = "recycle_intent"
+    save()
+    report["writes_attempted"] = True
+    storage.trash(entry["old"]["fid"])
+    entry["state"] = "recycle_returned"
+    save()
+    report["writes_performed"] = True
+    if not _settled(storage, gone, True):
+        raise _Stop("UNKNOWN", "replaced_episode_recycle_not_observed")
+    entry["state"] = "recycled"
+    save()
+
+
 def save_archive_episode(storage, root, config, *, candidate, source, episode_key, prefix, destination,
-                         include_media_tags=True):
-    """Fetch, extract and place one archive episode; the caller already authorized writes."""
+                         include_media_tags=True, cleanup="recycle", replacing=None):
+    """Fetch, extract and place one archive episode; the caller already authorized writes.
+
+    ``replacing`` is the episode's one existing video ({fid, name, size, parent_id})
+    in ``destination``; it is recycled after the new video is verified there.
+    """
     library_root = config["library_root_id"]
-    action = config.get(CLEANUP_KEY, "keep")
+    action = cleanup
     if action not in SOURCE_ACTIONS:
-        raise ValueError("config/headless.json 的 " + CLEANUP_KEY + " 只能是 keep、recycle 或 ask")
+        raise ValueError("压缩包清理方式只能是 keep、recycle 或 ask")
+    if replacing is not None and (not isinstance(replacing, dict) or set(replacing) != {"fid", "name", "size", "parent_id"}
+                                  or replacing["parent_id"] != destination):
+        raise ValueError("升级只能替换季目录中已核验的一个旧文件")
     report = {"status": "PLAN", "episode_key": episode_key, "candidate_id": candidate.get("candidate_id"),
               "writes_attempted": False, "writes_performed": False, "new_files": [], "reasons": []}
 
@@ -213,18 +277,26 @@ def save_archive_episode(storage, root, config, *, candidate, source, episode_ke
         folder = extraction["target"]["folder_id"]
         bound = {"account_scope_hash": _account(storage), "library_root_id": library_root, "folder_id": folder,
                  "destination": destination, "episode_key": episode_key, "archive_fid": archive_fid}
+        if replacing is not None:
+            bound["replacing_fid"] = replacing["fid"]
         if state is None:
             state = {"kind": "archive_place", "bound": bound,
                      "files": _plan(storage, folder=folder, archive=candidate, episode_key=episode_key,
                                     prefix=prefix, include_media_tags=include_media_tags)}
+            if replacing is not None:
+                state["replaced"] = {"old": deepcopy(replacing), "state": "kept_until_verified"}
             journal.put(place_key, state)
         elif state.get("kind") != "archive_place" or state.get("bound") != bound:
             raise _Stop("NEEDS_INPUT", "archive_placement_scope_changed")
-        _place(storage, journal, place_key, state, destination=destination, episode_key=episode_key, report=report)
+        _place(storage, journal, place_key, state, destination=destination, episode_key=episode_key, report=report,
+               replacing=replacing)
+        if "replaced" in state:
+            _retire(storage, journal, place_key, state, destination=destination, report=report)
+            report["replaced"] = deepcopy(state["replaced"])
         report["new_files"] = [{"fid": item["source"]["fid"], "saved_fid": item["source"]["fid"],
                                 "name": item["target_name"], "target_name": item["target_name"],
                                 "episode_key": episode_key, "verified": True} for item in state["files"]]
-        report["status"] = "COMPLETE"
+        report["status"] = "COMPLETE" if state.get("replaced", {}).get("state", "recycled") in _RETIRED else "PARTIAL"
         if action in {"recycle", "ask"}:
             parent = extraction["bound"]["source"]["parent_id"]
             cleanup = cleanup_extraction(storage, journal=journal, job_key=extract_key, library_root_id=library_root,
@@ -253,7 +325,8 @@ def save_archive_episode(storage, root, config, *, candidate, source, episode_ke
         report.update(status="RISK_CONTROL")
         report["reasons"].append("cloud_risk_control_stop")
     except Exception as exc:
-        pending = isinstance(state, dict) and any(item.get("state") in _PENDING for item in state.get("files", []))
+        pending = isinstance(state, dict) and any(item.get("state") in _PENDING for item in
+                                                  [*state.get("files", []), state.get("replaced", {})])
         report.update(status="UNKNOWN" if pending else "NEEDS_INPUT", error_type=type(exc).__name__)
         report["reasons"].append("archive_placement_not_completed")
     finally:

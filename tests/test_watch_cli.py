@@ -163,6 +163,23 @@ class WatchCommandsTests(unittest.TestCase):
                          (False, False, None))
         self.runner.assert_not_called()
 
+    def test_archive_and_upgrade_flags_are_explicit_and_reversible(self):
+        fields = ("archive_pick_largest", "archive_tiebreak_labels", "archive_video_fallback", "upgrade_existing",
+                  "archive_cleanup", "prefer_hdr_format", "upgrade_min_ratio")
+        record = self.add()
+        self.assertEqual(tuple(record[key] for key in fields), (False, False, False, False, "recycle", None, 1.5))
+        record = self.add("--archive-pick-largest", "--archive-tiebreak-labels", "--archive-video-fallback",
+                          "--upgrade-existing", "--archive-cleanup", "keep", "--prefer-hdr-format", "dv",
+                          "--upgrade-min-ratio", "2")
+        self.assertEqual(tuple(record[key] for key in fields), (True, True, True, True, "keep", "dv", 2.0))
+        self.assertTrue(self.add()["upgrade_existing"])
+        record = self.add("--no-archive-pick-largest", "--no-archive-tiebreak-labels", "--no-archive-video-fallback",
+                          "--no-upgrade-existing", "--prefer-hdr-format", "none")
+        self.assertEqual(tuple(record[key] for key in fields), (False, False, False, False, "keep", None, 2.0))
+        code, report = self.command(["add", "--task-id", self.task["task_id"], "--upgrade-min-ratio", "1"])
+        self.assertEqual((code, report["status"]), (1, "FAILED"), report)
+        self.runner.assert_not_called()
+
     def test_secondary_requires_source_and_id_pair(self):
         for arguments in (["--secondary-source", "tvmaze"], ["--secondary-id", "91309"]):
             with self.subTest(arguments=arguments):

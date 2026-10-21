@@ -131,6 +131,14 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(media_info("Movie.2010.DTS-x265.mkv")["audio"], "DTS")
         self.assertEqual(media_info("Movie.2010.DTS.X.7.1.mkv")["audio"], "DTS-X7.1")
 
+    def test_chinese_dolby_vision_label_is_recognized_even_when_glued(self):
+        for folder in ("4K 杜比视界 高码", "4K杜比视界高码", "杜比視界"):
+            with self.subTest(folder=folder):
+                self.assertEqual(media_info("02.mkv", "测试剧/" + folder)["hdr"], "Dolby Vision")
+        self.assertEqual(episode_filename("测试剧 (2026)", 1, 2, ".mkv", media_info("02.mkv", "4K杜比视界")),
+                         "测试剧 (2026)S01E02_2160P_DV.mkv")
+        self.assertIsNone(media_info("02.mkv", "杜比音效")["hdr"])
+
     def test_dv_and_hdr_base_labels_do_not_conflict_but_sdr_does(self):
         info = media_info("01.DV.HDR10.mkv")
         self.assertEqual(info["hdr"], "Dolby Vision")

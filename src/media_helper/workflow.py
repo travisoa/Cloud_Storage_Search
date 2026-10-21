@@ -996,13 +996,15 @@ def _recycle_entries(storage, journal, key, record, report, verified):
         _put(journal, key, record)
 
 
-def run(request, storage, metadata, search, journal, apply=False, *, resume_only=False):
+def run(request, storage, metadata, search, journal, apply=False, *, resume_only=False, survey_existing=False):
     """Reconcile an explicitly identified season, optionally saving missing files.
 
     Required identity fields: title, year, season, series_id, metadata_source,
     library_root_id. target_folder_id can explicitly select an observed root
     descendant. source_selection maps episode keys to candidate IDs (or url/fid).
     ``apply=True`` is the caller's already-established user authorization.
+    ``survey_existing`` still lists share candidates when nothing is missing,
+    for a subscription's read-only upgrade check.
     """
     request = deepcopy(request)
     report = {"schema_version": 1, "mode": "apply" if apply else "plan", "status": "READY",
@@ -1118,6 +1120,8 @@ def run(request, storage, metadata, search, journal, apply=False, *, resume_only
             report["status"] = ("COMPLETE" if report["operations"] else "UP_TO_DATE") if not report["unknown_schedule"] else "NEEDS_INPUT"
             if report["unknown_schedule"]:
                 report["reasons"].append("unknown_air_dates_cannot_establish_latest_episode")
+            elif survey_existing and not apply:
+                _select(request, storage, search, [], report)
             return report
         selected = _select(request, storage, search, report["missing"], report)
         if report["status"] == "NEEDS_INPUT":

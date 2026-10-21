@@ -62,7 +62,7 @@ python3 scripts/media.py archive cleanup --fid ARCHIVE_FID --apply
 
 分卷（含 ZIP + Z01）、缺卷、加密或密码、未知格式及会员要求保留具体待处理原因，不自动输入密码、本地解压或推断分卷完整性。认证和风控按[执行范围](headless-design.md#执行范围)处理。无任务 ID 的未知提交不重发；有任务 ID 时通过 `--reconcile` 查询状态与实际输出，不因更换目录或嵌套影库重复提交。隔离测试影库仅允许检查和预览。
 
-解压残留按 `config/headless.json` 的 `archive_cleanup` 处理，回收均指移入夸克回收站，不清空回收站：
+手动 `archive` 命令的解压残留按 `config/headless.json` 的 `archive_cleanup` 处理（订阅 `archive_auto` 使用订阅自己的 `archive_cleanup`，默认 `recycle`），回收均指移入夸克回收站，不清空回收站：
 
 | 取值 | 解压核验通过后 | `organize` 完成后 |
 | --- | --- | --- |
@@ -112,7 +112,7 @@ python3 scripts/media.py archive plan --fid 压缩包FID --season 1 --episode 13
 
 `--title/--year` 仅在文件名与目录都无法给出作品名时使用，且须与 `--season/--episode` 同时指定。指定季集只补充缺失的标记，不覆盖文件名中不同的集号、季号、特别篇或多集标记；作品名与年份仍经元数据精确匹配及该集存在性核验，文件名或目录已有完整作品名时须一致。输出含多个正片视频时返回 `explicit_episode_requires_single_video_output`，不生成计划。
 
-订阅追更开启 `archive_auto: largest` 后，缺集压缩包可自动完成上述转存、解压及入库，规则见[订阅与周期检查](headless-design.md#订阅与周期检查)。
+订阅追更开启 `archive_auto: largest` 后，缺集压缩包可自动完成上述转存、解压及入库；同集多包取最大、3% 内按标签择优、压缩包与视频分开判断及升级已有集均为订阅级开关，规则见[订阅与周期检查](headless-design.md#订阅与周期检查)。
 
 ## 单个作品目录原地规范命名
 
