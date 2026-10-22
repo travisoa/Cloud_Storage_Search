@@ -34,9 +34,11 @@ ARCHIVE_AUTO = (None, "largest")
 ARCHIVE_CLEANUP = ("recycle", "keep", "ask")
 HDR_PREFERENCES = (None, "dv", "hdr")
 UPGRADE_MIN_RATIO = 1.5
+UPGRADE_MIN_RATIO_HIGHER_TIER = 1.0
 POLICY_DEFAULTS = {**{field: False for field in SOURCE_SWITCHES}, "archive_auto": None,
                    "archive_cleanup": ARCHIVE_CLEANUP[0], "prefer_hdr_format": None,
-                   "upgrade_min_ratio": UPGRADE_MIN_RATIO}
+                   "upgrade_min_ratio": UPGRADE_MIN_RATIO,
+                   "upgrade_min_ratio_higher_tier": UPGRADE_MIN_RATIO_HIGHER_TIER}
 _UNSET = object()
 _SECRET = re.compile(r"cookie|auth|token|password|passcode|secret|credential|api[-_]?key|signature|(?:^|_)(?:pwd|sig)(?:$|_)", re.I)
 _ID = re.compile(r"[A-Za-z0-9_-]{1,240}")
@@ -169,11 +171,13 @@ def _policy(field, value):
     elif field == "prefer_hdr_format":
         if value not in HDR_PREFERENCES:
             raise ValueError("HDR 格式偏好只能为 dv、hdr 或不设置")
-    elif field == "upgrade_min_ratio":
-        # Below 1.05 an archive and its own extracted video could replace each other.
+    elif field in ("upgrade_min_ratio", "upgrade_min_ratio_higher_tier"):
+        # Same tier: below 1.05 an archive and its own extracted video could replace
+        # each other. Higher tier: a better resolution may justify a somewhat smaller file.
+        low, label = (1.05, "升级体积倍数") if field == "upgrade_min_ratio" else (0.5, "更高分辨率升级的体积倍数")
         if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or not 1.05 <= value <= 10):
-            raise ValueError("升级体积倍数必须为 1.05–10")
+                or not math.isfinite(value) or not low <= value <= 10):
+            raise ValueError(f"{label}必须为 {low:g}–10")
     else:
         raise ValueError("不支持的订阅策略：" + str(field))
     return value

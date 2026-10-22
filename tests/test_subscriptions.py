@@ -307,19 +307,23 @@ class SubscriptionTests(unittest.TestCase):
         record = self.add()
         self.assertEqual({key: record[key] for key in ("archive_pick_largest", "archive_tiebreak_labels",
                                                        "archive_video_fallback", "upgrade_existing", "archive_cleanup",
-                                                       "prefer_hdr_format", "upgrade_min_ratio")},
+                                                       "prefer_hdr_format", "upgrade_min_ratio",
+                                                       "upgrade_min_ratio_higher_tier")},
                          {"archive_pick_largest": False, "archive_tiebreak_labels": False,
                           "archive_video_fallback": False, "upgrade_existing": False, "archive_cleanup": "recycle",
-                          "prefer_hdr_format": None, "upgrade_min_ratio": 1.5})
+                          "prefer_hdr_format": None, "upgrade_min_ratio": 1.5, "upgrade_min_ratio_higher_tier": 1.0})
         chosen = {"archive_pick_largest": True, "archive_tiebreak_labels": True, "archive_video_fallback": True,
-                  "upgrade_existing": True, "archive_cleanup": "ask", "prefer_hdr_format": "dv", "upgrade_min_ratio": 2}
+                  "upgrade_existing": True, "archive_cleanup": "ask", "prefer_hdr_format": "dv", "upgrade_min_ratio": 2,
+                  "upgrade_min_ratio_higher_tier": 0.8}
         self.add(**chosen)
         same = self.add(auto_save=True)
         self.assertEqual({key: same[key] for key in chosen}, chosen)
         self.assertEqual({key: self.store.list()[0][key] for key in chosen}, chosen)
         for options in ({"upgrade_existing": "yes"}, {"archive_cleanup": "delete"}, {"archive_cleanup": None},
                         {"prefer_hdr_format": "hdr10"}, {"upgrade_min_ratio": 1.0}, {"upgrade_min_ratio": True},
-                        {"upgrade_min_ratio": float("nan")}, {"upgrade_min_ratio": 11}):
+                        {"upgrade_min_ratio": float("nan")}, {"upgrade_min_ratio": 11},
+                        {"upgrade_min_ratio_higher_tier": 0.4}, {"upgrade_min_ratio_higher_tier": 11},
+                        {"upgrade_min_ratio_higher_tier": False}, {"upgrade_min_ratio_higher_tier": float("inf")}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 self.add(**options)
         with self.assertRaises(TypeError):
@@ -328,11 +332,13 @@ class SubscriptionTests(unittest.TestCase):
     def test_records_without_the_new_policies_still_load_but_bad_values_do_not(self):
         record = self.add()
         data = json.loads(self.path.read_text())
-        for field in ("archive_pick_largest", "upgrade_existing", "archive_cleanup", "upgrade_min_ratio"):
+        for field in ("archive_pick_largest", "upgrade_existing", "archive_cleanup", "upgrade_min_ratio",
+                      "upgrade_min_ratio_higher_tier"):
             data["subscriptions"][record["subscription_id"]].pop(field)
         self.path.write_text(json.dumps(data))
         self.assertNotIn("upgrade_existing", self.store.get(record["subscription_id"]))
-        for field, value in (("archive_cleanup", "delete"), ("upgrade_min_ratio", 0.5), ("prefer_hdr_format", "all")):
+        for field, value in (("archive_cleanup", "delete"), ("upgrade_min_ratio", 0.5), ("prefer_hdr_format", "all"),
+                             ("upgrade_min_ratio_higher_tier", 0.1)):
             data["subscriptions"][record["subscription_id"]][field] = value
             self.path.write_text(json.dumps(data))
             with self.subTest(field=field), self.assertRaises(ValueError):

@@ -34,10 +34,25 @@ class UpgradeDecisionTests(unittest.TestCase):
     def test_off_by_default(self):
         self.assertEqual(self.plan([video("4k")], upgrade_existing=False), {})
 
-    def test_higher_resolution_replaces_regardless_of_the_ratio(self):
-        plan = self.plan([video("4k", size=900)])
+    def test_higher_resolution_needs_its_own_size_ratio(self):
+        plan = self.plan([video("4k", size=1000)], upgrade_min_ratio=3.0)
         self.assertEqual((plan["S01E02"]["kind"], plan["S01E02"]["basis"]), ("video", "higher_resolution"))
         self.assertEqual(plan["S01E02"]["old"], {"fid": "old", "name": OLD, "size": 1000, "parent_id": "season"})
+        self.assertEqual(self.plan([video("4k", size=1999)], upgrade_min_ratio_higher_tier=2.0), {})
+        self.assertEqual(self.plan([video("4k", size=700)], upgrade_min_ratio_higher_tier=0.7)["S01E02"]["basis"],
+                         "higher_resolution")
+
+    def test_higher_resolution_but_smaller_never_replaces(self):
+        self.assertEqual(self.plan([video("4k", size=999)]), {})
+        # A 1.90 GB 1080p episode against a 1.35 GB low-bitrate 4K archive.
+        rows = [existing("测试剧 (2026)S01E14_1080P.mkv", size=1900, key="S01E14")]
+        low = archive("low", path="测试剧/4K SDR 低码/14.zip", size=1350)
+        self.assertEqual(self.plan(archives=[low], rows=rows, archive_auto="largest"), {})
+        self.assertEqual(self.plan([video("4k", size=1350, key="S01E14")], rows=rows), {})
+
+    def test_a_smaller_higher_tier_leaves_room_for_a_clearly_larger_same_tier(self):
+        plan = self.plan([video("4k", size=900), video("big", "1080p", size=1500)])
+        self.assertEqual((plan["S01E02"]["candidate"]["candidate_id"], plan["S01E02"]["basis"]), ("big", "larger_size"))
 
     def test_same_resolution_needs_the_size_ratio(self):
         self.assertEqual(self.plan([video("big", "1080p", size=1499)]), {})
@@ -160,6 +175,13 @@ class UpgradeCycleTests(CycleCase):
         self.assertEqual(report["status"], "UP_TO_DATE", report)
         self.assertEqual([(row["episode_key"], row["basis"], row["target_name"]) for row in report["upgrade_plan"]],
                          [("S01E02", "higher_resolution", "测试剧 (2026)S01E02_2160P.mkv")])
+        self.assert_no_writes()
+
+    def test_a_smaller_higher_resolution_video_is_not_planned(self):
+        self.fourk_share(size=2000)
+        report = self.cycle(self.sub())
+        self.assertEqual(report["status"], "UP_TO_DATE", report)
+        self.assertNotIn("upgrade_plan", report)
         self.assert_no_writes()
 
     def test_higher_resolution_video_replaces_the_old_file_after_verification(self):

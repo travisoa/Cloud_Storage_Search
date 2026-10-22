@@ -54,7 +54,7 @@
 
 单次数字集号确认不覆盖后续文件。订阅可显式保存持续映射规则，由原任务确认与转存凭据支持；后续文件须同时匹配来源哈希、分享父目录、季和画质，才将纯数字文件名解释为该季集号。目录、来源、季或画质变化时重新确认，标题相似与文件顺序不作为编号依据。
 
-订阅另有以下默认关闭的来源、压缩包及升级策略，仅由 `watch add` 显式开启或关闭（`--trust-share-title` / `--no-trust-share-title`、`--wait-on-uncertain` / `--block-on-uncertain`、`--archive-auto largest|off`、`--archive-pick-largest`、`--archive-tiebreak-labels`、`--archive-video-fallback`、`--prefer-hdr-format dv|hdr|none`、`--upgrade-existing` 及 `--upgrade-min-ratio`，开关均有对应的 `--no-` 形式）；重复添加时未指定的选项保持原值。
+订阅另有以下默认关闭的来源、压缩包及升级策略，仅由 `watch add` 显式开启或关闭（`--trust-share-title` / `--no-trust-share-title`、`--wait-on-uncertain` / `--block-on-uncertain`、`--archive-auto largest|off`、`--archive-pick-largest`、`--archive-tiebreak-labels`、`--archive-video-fallback`、`--prefer-hdr-format dv|hdr|none`、`--upgrade-existing`、`--upgrade-min-ratio` 及 `--upgrade-min-ratio-higher-tier`，开关均有对应的 `--no-` 形式）；重复添加时未指定的选项保持原值。
 
 - `trust_share_title`：未选来源的文件路径不含剧名时，满足以下全部条件仍可接受：搜索结果标题含剧名或别名（分享根目录名属于路径，已由原检查覆盖）；文件名自带本季 SxxEyy，或路径中恰有一个季目录（`Season 1`、`S01`、`第一季`）与订阅季一致且文件名给出集号（含纯数字）；同一分享内该集通过画质筛选的候选只有一个。季目录与订阅季不一致、存在多个季目录或同一分享有多个候选时仍为不确定；不同分享之间按原评分择优，并列仍为不确定。
 - `wait_on_uncertain_source`：来源或集号不确定的集数只在本轮等待（`WAITING`，原因 `subscription_source_uncertain_retry_next_cycle`），下个检查时段重新搜索；同轮已确定的其他集照常转存。认证、风控、写入结果未知、元数据冲突及目录冲突仍阻断订阅。
@@ -64,7 +64,7 @@
 - `archive_tiebreak_labels`：与最大体积相差 3% 以内的压缩包或视频，先按目录名及文件名标签排序：DV/杜比视界 > HDR > SDR（无标签按 SDR 计），高码 > 低码，再比体积。差距超过 3% 时仍取最大者。
 - `prefer_hdr_format: dv|hdr`：同样只在 3% 以内生效，所选格式优先于上一项的默认顺序（`hdr` 指 DV 以外的 HDR10+/HDR10/HDR/HLG）；不改变“取最大”的主规则。
 - `archive_video_fallback`：压缩包与普通视频分开判断。压缩包一路不确定时，不再撤下该集已选中的视频；最终在最佳压缩包与最大的合格视频之间按体积（及上述 3% 规则）择一。所选压缩包解压后不可用（结果已知的 `NEEDS_INPUT`，如含多个视频）时，同一轮改存该集视频，原因 `archive_unusable_saved_video_instead`，解压残留保留待处理；认证、风控或结果未知时不退回，照常阻断。
-- `upgrade_existing`（`upgrade_min_ratio` 默认 1.5，范围 1.05–10）：季目录中某集恰有一个视频、出现明显更好的版本时自动替换。候选为该集压缩包规则选出的包，否则为来源与集号均已授权的视频中分辨率等级最高、再体积最大者；已选来源不享有优先。分辨率等级更高（如 1080p → 2160p；有版本策略时按其分辨率顺序），或等级相同（旧文件无分辨率标签时亦然）且体积不小于旧文件的 `upgrade_min_ratio` 倍时替换；候选无分辨率标签或等级更低时不替换。视频沿用 `sync --replace-episode ... --remove-replaced` 的流程，压缩包需同时开启 `archive_auto`：新文件转存或解压、改名并在季目录读回名称、大小与位置后，才把记录中的旧 fid 移入回收站；写前核对该集仍只有该旧文件，回收请求先落盘，结果未知时只读回。目标名已被占用（含新旧同名）时本轮跳过，原因 `existing_episode_upgrade_skipped`，不阻断；尚未发出写入即停止的升级同样跳过。已发出写入后未完成（含旧文件未能回收）则按普通写入阻断。本轮刚补的集不参与升级；旧文件的字幕不处理。开启后每次检查都会搜索并列出已选来源与 PanSou 结果中的分享，影库侧只读取作品目录和本季目录，不遍历全库。
+- `upgrade_existing`（`upgrade_min_ratio` 默认 1.5，范围 1.05–10；`upgrade_min_ratio_higher_tier` 默认 1.0，范围 0.5–10）：季目录中某集恰有一个视频、出现明显更好的版本时自动替换。分辨率等级更高（如 1080p → 2160p；有版本策略时按其分辨率顺序）且体积不小于旧文件的 `upgrade_min_ratio_higher_tier` 倍，或等级相同（旧文件无分辨率标签时亦然）且体积不小于旧文件的 `upgrade_min_ratio` 倍时替换；候选无分辨率标签或等级更低时不替换。因此默认不会用更小的 4K 低码文件替换较大的 1080p。候选为该集压缩包规则选出的包（该包不满足上述条件时本集不替换），否则为满足条件、来源与集号均已授权的视频中分辨率等级最高、再体积最大者；已选来源不享有优先。视频沿用 `sync --replace-episode ... --remove-replaced` 的流程，压缩包需同时开启 `archive_auto`：新文件转存或解压、改名并在季目录读回名称、大小与位置后，才把记录中的旧 fid 移入回收站；写前核对该集仍只有该旧文件，回收请求先落盘，结果未知时只读回。目标名已被占用（含新旧同名）时本轮跳过，原因 `existing_episode_upgrade_skipped`，不阻断；尚未发出写入即停止的升级同样跳过。已发出写入后未完成（含旧文件未能回收）则按普通写入阻断。本轮刚补的集不参与升级；旧文件的字幕不处理。开启后每次检查都会搜索并列出已选来源与 PanSou 结果中的分享，影库侧只读取作品目录和本季目录，不遍历全库。
 
 转存或压缩包入库成功后，所用分享（含分享内目录、路径及画质依据）追加到订阅来源，原有来源保留在前，失效来源不被替换。`watch add --source-url URL --append-source` 以同样方式追加导入的来源；不带 `--append-source` 时替换已记录来源。
 

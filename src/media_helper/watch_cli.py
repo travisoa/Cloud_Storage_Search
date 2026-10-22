@@ -61,6 +61,8 @@ def add_parser(commands):
                      help='within 3%% of the largest size, prefer this HDR format')
     add.add_argument('--upgrade-min-ratio', type=float,
                      help='same-resolution upgrades need this many times the old size (default 1.5)')
+    add.add_argument('--upgrade-min-ratio-higher-tier', type=float,
+                     help='higher-resolution upgrades need this many times the old size (default 1.0)')
     actions.add_parser('list')
     status = actions.add_parser('status')
     status.add_argument('subscription_id')
@@ -153,6 +155,8 @@ def _add(args, config, root, store):
         options['prefer_hdr_format'] = None if args.prefer_hdr_format == 'none' else args.prefer_hdr_format
     if args.upgrade_min_ratio is not None:
         options['upgrade_min_ratio'] = args.upgrade_min_ratio
+    if args.upgrade_min_ratio_higher_tier is not None:
+        options['upgrade_min_ratio_higher_tier'] = args.upgrade_min_ratio_higher_tier
     if args.interval_hours is not None:
         options['interval_hours'] = args.interval_hours
     if args.auto_save is not None:

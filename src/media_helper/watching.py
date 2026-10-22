@@ -359,18 +359,21 @@ def select_upgrades(request, report, subscription, *, exclude=()):
     """``upgrade_existing``: existing episodes that have a clearly better version.
 
     An episode qualifies when the season folder holds exactly one sized video for
-    it. Its best authorized candidate is the archive ``archive_auto`` would pick,
-    else the authorized video with the highest resolution tier and then the
-    largest size (near-size label preferences apply). It replaces the old file
-    when its tier is higher, or the same (or the old one unlabelled) with at
-    least ``upgrade_min_ratio`` times the size. A candidate without a resolution
-    label, or with a lower one, never replaces anything. Preferred sources give
-    no priority here: a better version may come from any authorized share.
+    it. A candidate replaces the old file when its resolution tier is higher and
+    its size at least ``upgrade_min_ratio_higher_tier`` times the old one, or the
+    tier is the same (or the old file unlabelled) with at least
+    ``upgrade_min_ratio`` times the size. A candidate without a resolution label,
+    or with a lower one, never replaces anything. The archive ``archive_auto``
+    would pick is the episode's only candidate; otherwise the qualifying
+    authorized video with the highest tier and then the largest size (near-size
+    label preferences apply). Preferred sources give no priority here: a better
+    version may come from any authorized share.
     """
     destination = report.get('target_folder_id')
     if subscription.get('upgrade_existing') is not True or not destination:
         return {}
     ratio = subscription.get('upgrade_min_ratio', POLICY_DEFAULTS['upgrade_min_ratio'])
+    higher_ratio = subscription.get('upgrade_min_ratio_higher_tier', POLICY_DEFAULTS['upgrade_min_ratio_higher_tier'])
     version_policy, _ = _filters(request)
     order = version_policy['resolution_order'] if version_policy else list(reversed(_TIERS))
     olds = {}
@@ -387,12 +390,23 @@ def select_upgrades(request, report, subscription, *, exclude=()):
     archives, _ = select_archives(request, view, subscription)
     plan = {}
     for key, old in sorted(olds.items()):
+        current = _tier(media_info(workflow._name(old), posixpath.dirname(old.get('path', ''))), order)
+
+        def basis(row):
+            """Why ``row`` replaces the old file, or None when it does not."""
+            new = _tier(_info(row), order)
+            if new is None or (current is not None and new < current):
+                return None
+            higher = current is not None and new > current
+            if row['size'] < (higher_ratio if higher else ratio) * old['size']:
+                return None
+            return 'higher_resolution' if higher else 'larger_size'
         mapping = None
         if key in archives:
             kind, item = 'archive', archives[key]
         else:
             rows = {candidate['candidate_id']: (candidate, value) for candidate, value in grouped.get(key, {}).values()
-                    if _tier(_info(candidate), order) is not None}
+                    if basis(candidate)}
             if not rows:
                 continue
             best = max(_tier(_info(candidate), order) for candidate, _ in rows.values())
@@ -401,17 +415,13 @@ def select_upgrades(request, report, subscription, *, exclude=()):
             if len(top) != 1:
                 continue
             kind, (item, mapping) = 'video', rows[top[0]['candidate_id']]
-        new = _tier(_info(item), order)
-        current = _tier(media_info(workflow._name(old), posixpath.dirname(old.get('path', ''))), order)
-        if new is None or (current is not None and new < current):
-            continue
-        higher = current is not None and new > current
-        if not higher and item['size'] < ratio * old['size']:
+        reason = basis(item)
+        if not reason:
             continue
         plan[key] = {'kind': kind, 'candidate': item, 'mapping': mapping,
                      'old': {'fid': workflow._fid(old), 'name': workflow._name(old), 'size': old['size'],
                              'parent_id': str(old['parent_id'])},
-                     'basis': 'higher_resolution' if higher else 'larger_size'}
+                     'basis': reason}
     return plan
 
 
