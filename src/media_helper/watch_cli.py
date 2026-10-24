@@ -7,6 +7,7 @@ import re
 
 from .journal import run_lock, safe_record
 from .profiles import private_json
+from .schedules import ScheduleCache, supplement_summary
 from .sources import extract_selected_sources, safe_source
 from .subscriptions import SubscriptionStore
 from .tasks import TaskStore
@@ -72,6 +73,8 @@ def add_parser(commands):
     run.add_argument('--force', action='store_true', help='check now, still respecting pause, blocks and write authority')
     run.add_argument('--apply', action='store_true')
     run.add_argument('--plan', action='store_true', help='always read-only, including when --apply is present')
+    run.add_argument('--refresh-schedule', action='store_true',
+                     help='re-read the season schedule now instead of the cached daily copy')
     for name in ('pause', 'resume'):
         action = actions.add_parser(name)
         action.add_argument('subscription_id')
@@ -185,13 +188,15 @@ def _run(args, config, root, store):
     records = [row for row in records if row['enabled']]
     outcomes = []
     for record in records:
-        report = run_subscription(record, config, root, apply=bool(args.apply and not args.plan), as_of=current)
+        report = run_subscription(record, config, root, apply=bool(args.apply and not args.plan), as_of=current,
+                                  refresh_schedule=args.refresh_schedule)
         if report.get('preferred_sources'):
             store.update_sources(record['subscription_id'], report['preferred_sources'])
-        outcome = store.record_run(record['subscription_id'], report, checked_at=current)
+        outcome = store.record_run(record['subscription_id'], report, checked_at=current,
+                                   next_check_at=_later(report.get('next_check_at'), current))
         outcomes.append({'subscription_id': record['subscription_id'], 'title': record['request']['title'],
                          'task_id': report.get('task_id'), 'blocked': outcome['record']['blocked'],
-                         'next_check_at': outcome['record']['next_check_at'],
+                         'next_check_at': outcome['record']['next_check_at'], 'wake_plan': report.get('wake_plan'),
                          **{key: outcome[key] for key in ('summary', 'meaningful_change', 'new_files')}})
         if report.get('status') in {'NEEDS_AUTH', 'RISK_CONTROL'}:
             break
@@ -204,12 +209,26 @@ def _run(args, config, root, store):
     return result
 
 
+def _later(value, current):
+    """A schedule-based next check is used only when it is later than this run."""
+    try:
+        moment = datetime.fromisoformat(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
+    return value if moment is not None and moment.tzinfo is not None and moment > current else None
+
+
 def run_command(args, config, root):
     store = SubscriptionStore(root / 'runtime/subscriptions.json', config['library_root_id'])
     if args.watch_action == 'list':
         return {'status': 'SUBSCRIPTIONS', 'subscriptions': store.list(), 'browser_opened': False}
     if args.watch_action == 'status':
-        return {'status': 'SUBSCRIPTION_STATUS', 'subscription': store.get(args.subscription_id), 'browser_opened': False}
+        record = store.get(args.subscription_id)
+        cached = ScheduleCache(root).load(record['subscription_id']) or {}
+        supplement = cached.get('supplement')
+        return {'status': 'SUBSCRIPTION_STATUS', 'subscription': record, 'wake_plan': cached.get('wake_plan'),
+                'schedule_supplement': supplement_summary(supplement) if isinstance(supplement, dict) else None,
+                'browser_opened': False}
     try:
         with run_lock(root / 'runtime/workflow.lock'):
             if args.watch_action == 'add':
@@ -221,7 +240,9 @@ def run_command(args, config, root):
             if args.clear_block:
                 from .watching import run_subscription
                 record = store.get(args.subscription_id)
-                report = run_subscription(record, config, root, apply=False, reconcile_pending=True)
+                # Clearing a block always re-reads metadata; a cached schedule cannot vouch for it.
+                report = run_subscription(record, config, root, apply=False, reconcile_pending=True,
+                                          refresh_schedule=True)
                 if report.get('subscription_id') != record['subscription_id']:
                     raise ValueError('只读对账的订阅身份不一致')
                 store.clear_block(record['subscription_id'], report)

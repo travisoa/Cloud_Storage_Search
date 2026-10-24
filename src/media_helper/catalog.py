@@ -340,6 +340,23 @@ def _external_ids(data):
             "tvdb_id": _integer(data.get("tvdb_id", data.get("thetvdb")), 1, 2**63 - 1)}
 
 
+def _private_credentials(path, label):
+    candidate = Path(path)
+    try:
+        if candidate.is_symlink() or stat.S_IMODE(candidate.stat().st_mode) != 0o600:
+            raise ValueError(f"{label} credentials file must be a regular private 0600 file")
+        if not candidate.is_file():
+            raise ValueError(f"{label} credentials file must be a regular private 0600 file")
+        data = json.loads(candidate.read_text(encoding="utf-8"))
+    except OSError:
+        raise ValueError(f"{label} credentials file is not readable") from None
+    except (json.JSONDecodeError, UnicodeError):
+        raise ValueError(f"{label} credentials file must contain valid JSON") from None
+    if not isinstance(data, dict):
+        raise ValueError(f"{label} credentials file must contain a JSON object")
+    return data
+
+
 class TMDBProvider(_Provider):
     source = "tmdb"
     base_url = "https://api.themoviedb.org/3"
@@ -354,19 +371,7 @@ class TMDBProvider(_Provider):
     @classmethod
     def from_credentials_file(cls, path, **kwargs):
         """Read only the explicitly supplied private JSON file; no discovery."""
-        candidate = Path(path)
-        try:
-            if candidate.is_symlink() or stat.S_IMODE(candidate.stat().st_mode) != 0o600:
-                raise ValueError("TMDB credentials file must be a regular private 0600 file")
-            if not candidate.is_file():
-                raise ValueError("TMDB credentials file must be a regular private 0600 file")
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-        except OSError:
-            raise ValueError("TMDB credentials file is not readable") from None
-        except (json.JSONDecodeError, UnicodeError):
-            raise ValueError("TMDB credentials file must contain valid JSON") from None
-        if not isinstance(data, dict):
-            raise ValueError("TMDB credentials file must contain a JSON object")
+        data = _private_credentials(path, "TMDB")
         return cls(read_access_token=data.get("read_access_token"), api_key=data.get("api_key"), **kwargs)
 
     def _request(self, path, params=None):
@@ -634,4 +639,95 @@ class TVmazeProvider(_Provider):
                              "source_id": item.get("id"), "series_id": series_id, "fetched_at": fetched,
                              "date_precision": precision, "airing_status": "expected", "is_expected": True,
                              "is_special": item.get("type") not in {None, "regular"}})
+        return episodes
+
+
+def _zone(name):
+    try:
+        return ZoneInfo(name) if isinstance(name, str) and name else SHANGHAI
+    except (ValueError, KeyError):
+        return SHANGHAI
+
+
+class TraktProvider(_Provider):
+    """Public Trakt reads with a Client ID only; no user OAuth.
+
+    Trakt supplements a bound TMDB schedule. It never selects an identity and
+    its broadcast instants are expected schedules, not release confirmations.
+    """
+    source = "trakt"
+    base_url = "https://api.trakt.tv"
+
+    def __init__(self, *, client_id, opener=None, now=None):
+        super().__init__(opener=opener, now=now)
+        self._client_id = client_id.strip() if isinstance(client_id, str) else ""
+        if not self._client_id:
+            raise ValueError("Trakt requires a Client ID")
+
+    @classmethod
+    def from_credentials_file(cls, path, **kwargs):
+        """Read only the explicitly supplied private JSON file; no discovery."""
+        return cls(client_id=_private_credentials(path, "Trakt").get("client_id"), **kwargs)
+
+    def _request(self, path, params=None):
+        return self._get(path, params, {"Content-Type": "application/json", "trakt-api-key": self._client_id,
+                                        "trakt-api-version": "2"})
+
+    def find_by_tmdb(self, tmdb_id) -> list[dict]:
+        tmdb_id = _source_id(tmdb_id)
+        data = self._request(f"/search/tmdb/{tmdb_id}", {"type": "show"})
+        if not isinstance(data, list):
+            raise MetadataError(self.source, "unexpected_external_search_response")
+        fetched, rows = self._fetched_at(), []
+        for item in data:
+            show = item.get("show") if isinstance(item, dict) and item.get("type") == "show" else None
+            ids = show.get("ids") if isinstance(show, dict) else None
+            if not isinstance(ids, dict) or _integer(ids.get("trakt"), 1, 2**63 - 1) is None:
+                continue
+            rows.append({"id": ids["trakt"], "source_id": ids["trakt"], "source": self.source,
+                         "title": show.get("title") or "", "year": _integer(show.get("year"), 1800, 2999),
+                         "tmdb_id": _integer(ids.get("tmdb"), 1, 2**63 - 1), "fetched_at": fetched})
+        return rows
+
+    def get_series(self, series_id) -> dict:
+        series_id = _source_id(series_id)
+        data = self._request(f"/shows/{series_id}", {"extended": "full"})
+        ids = data.get("ids") if isinstance(data, dict) else None
+        if not isinstance(ids, dict) or ids.get("trakt") != series_id:
+            raise MetadataError(self.source, "unexpected_series_identity")
+        airs = data.get("airs") if isinstance(data.get("airs"), dict) else {}
+        return {"id": series_id, "source_id": series_id, "source": self.source,
+                "title": data.get("title") or "", "year": _integer(data.get("year"), 1800, 2999),
+                "status": data.get("status"),
+                "airs": {key: airs.get(key) if isinstance(airs.get(key), str) else None
+                         for key in ("day", "time", "timezone")},
+                "tmdb_id": _integer(ids.get("tmdb"), 1, 2**63 - 1),
+                **_external_ids({"imdb_id": ids.get("imdb"), "tvdb_id": ids.get("tvdb")}),
+                "fetched_at": self._fetched_at()}
+
+    def get_season(self, series_id, season, timezone_name="Asia/Shanghai") -> list[dict]:
+        series_id = _source_id(series_id)
+        season = _integer(season, 1, 99)
+        if season is None:
+            raise ValueError("season must be explicitly selected within 1..99")
+        data = self._request(f"/shows/{series_id}/seasons/{season}", {"extended": "full"})
+        if not isinstance(data, list):
+            raise MetadataError(self.source, "unexpected_season_response")
+        zone, fetched, episodes = _zone(timezone_name), self._fetched_at(), []
+        for item in data:
+            if not isinstance(item, dict) or item.get("season") != season:
+                continue
+            air_at = air_date = None
+            try:
+                stamp = _aware_datetime(item.get("first_aired"), allow_date=False)
+                air_at = stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                air_date = stamp.astimezone(zone).date().isoformat()
+            except (TypeError, ValueError):
+                pass
+            ids = item.get("ids") if isinstance(item.get("ids"), dict) else {}
+            episodes.append({"season": season, "episode": item.get("number"), "title": item.get("title") or "",
+                             "air_date": air_date, "air_at": air_at, "source": self.source,
+                             "source_id": ids.get("trakt"), "series_id": series_id, "fetched_at": fetched,
+                             "date_precision": "datetime" if air_at else "unknown",
+                             "airing_status": "expected", "is_expected": True})
         return episodes

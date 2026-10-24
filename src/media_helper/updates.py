@@ -155,6 +155,48 @@ def _merge(primary, secondary, report):
     return merged
 
 
+def fill_schedule(episodes, supplement, report):
+    """Fill gaps in a bound primary schedule: the primary leads, an earlier date wins.
+
+    Unlike ``_merge`` a disagreement is evidence, never a conflict. A schedule
+    only decides when to search; a transfer still needs real matched files.
+    """
+    extra = {}
+    for row in supplement:
+        try:
+            extra[str(EpisodeKey(row.get("season"), row.get("episode")))] = row
+        except (ValueError, AttributeError):
+            continue
+    merged, keys = [], set()
+    for episode in episodes:
+        row = deepcopy(episode)
+        key = row.get("episode_key") or str(EpisodeKey(row.get("season"), row.get("episode")))
+        keys.add(key)
+        row["schedule_basis"] = "primary"
+        other = extra.get(key)
+        first_date, first_stamp = _schedule(row)
+        second_date, second_stamp = _schedule(other) if other else (None, None)
+        if second_stamp is None or second_date is None or first_stamp is not None:
+            merged.append(row)
+            continue
+        if first_date is not None and first_date != second_date:
+            chosen = "supplement" if second_date < first_date else "primary"
+            report["evidence"].append({"code": "supplement_schedule_disagreement", "episode_key": key,
+                                        "primary_date": first_date.isoformat(),
+                                        "supplement_date": second_date.isoformat(), "chosen": chosen})
+            if chosen == "primary":
+                merged.append(row)
+                continue
+        row.update(air_date=second_date.isoformat(), air_at=other["air_at"], date_precision="datetime",
+                   schedule_basis="primary+supplement_time" if first_date == second_date else "supplement")
+        merged.append(row)
+    primary_only, supplement_only = sorted(keys - set(extra)), sorted(set(extra) - keys)
+    if primary_only or supplement_only:
+        report["evidence"].append({"code": "supplement_episode_set_difference",
+                                    "primary_only": primary_only, "supplement_only": supplement_only})
+    return merged
+
+
 def _secondary_identity(primary_ids, secondary, secondary_id, request, report):
     """Resolve one external-ID link. A fuzzy title result is never identity."""
     source = _source(secondary)

@@ -7,7 +7,7 @@
 | 模块 | 职责 |
 | --- | --- |
 | headless_cli | 请求解析、作品身份绑定、结构化报告、任务锁 |
-| catalog | 季集身份、真实库存索引、预计缺集、TMDB/TVmaze |
+| catalog | 季集身份、真实库存索引、预计缺集、TMDB/TVmaze，Trakt 只读补缺 |
 | profiles / tasks | 稳定作品身份、已核实别名与来源、作品级偏好、任务快照与确认记录 |
 | naming | 真实作品目录前缀、季集名、媒体标签及来源依据 |
 | search | 固定本机 PanSou 搜索，失败不换公开服务 |
@@ -16,7 +16,8 @@
 | workflow | 对照、选择、只补缺集、真实新 fid 核验与命名 |
 | journal | SQLite 原子执行记录、敏感字段拦截、并发锁 |
 | recovery / saved_naming | 只读云端对账、仅本项目已核验新 fid 的命名修正 |
-| updates | 保留主作品身份，核验补充来源的外部 ID，合并预计日程并报告冲突 |
+| updates | 保留主作品身份，核验补充来源的外部 ID，合并预计日程并报告冲突；Trakt 补缺按 TMDB 优先、取较早合并 |
+| schedules | 订阅日程缓存与每日刷新、Trakt 条目关联、下次检查时间与唤醒计划 |
 | sources / subscriptions / watching / watch_cli | 已选来源、根目录绑定的订阅、到期检查与受授权的补缺执行 |
 | library_registry / library_init / library_cli | 新网盘引用、指定父目录下的建库、显式选择影库，不切换默认配置 |
 | library_identity / library_import | 可选只读盘点、唯一电影/电视剧身份、整理预览与已授权导入计划 |
@@ -47,6 +48,8 @@
 `watch add --task-id ...` 从正式任务导入已确认的作品和季；`watch list/status` 查看订阅，`watch pause/resume` 控制后续检查。订阅存于私有的 `runtime/subscriptions.json`，身份包含主元数据来源、作品 ID、年份、季和影库根目录；重复添加沿用同一订阅。已暂停的订阅不因 `--force` 被执行。
 
 `watch run --due` 仅检查启用且到期的订阅，`--force` 可提前检查，不绕过暂停、授权或阻断。默认只读；订阅的 `auto_save` 已获授权、命令带 `--apply` 且无阻断时才写入。`--plan` 优先于 `--apply`。Codex heartbeat 通过正式入口周期唤醒；无变化、无到期任务或任务锁被占用时不通知，仅报告新增、失败或需要用户处理的变化，不发送 Telegram。
+
+日程按订阅缓存于 `runtime/schedules/`：首次检查拉取整季日程并保存，之后每轮只做作品身份核验、日程取自缓存；日程未结束时满 24 小时重新拉取，`watch run --refresh-schedule` 可立即刷新。TMDB 主来源在录入 Trakt 后由 Trakt 补齐缺少的日期与时刻，规则见[来源与日程边界](metadata-assessment.md)。每轮检查后按日程计算 `next_check_at`：已到时间的集都已入库（含本轮刚转存的集）时排到下一集预计时刻后 30 分钟，否则沿用 `interval_hours`，且不晚于 24 小时；仅有日期的集用 Trakt 作品常规播出时刻补成时刻。`watch run` 与 `watch status` 输出 `wake_plan`：播出时刻一致时 `rrule` 为每天的对齐时刻：播出后 30 分钟起，间距取不超过 `interval_hours` 且能整除一天的 1、2、3、4 或 6 小时（默认 6 小时即每天 4 个，周播剧同样每天）；`next_check_at` 对齐到离目标最近的计划时刻，定时任务晚几秒或几分钟启动也不会错过下一个时刻，拿到即跳过的时刻在 `--due` 下不调用接口、不读网盘。播出时刻不一致或缺失时退回固定间隔，间隔最长 24 小时。`--due` 对提前 5 分钟内触发的定时任务照常执行。`changed` 表示与上次相比有变化，`stop` 表示日程已结束且各集已入库。`watch status` 另输出 Trakt 补缺状态（`schedule_supplement`），Client ID 失效或应用被删除时给出 `rerun_configure_trakt`。项目不创建或修改定时任务；按日程安排检查已获用户授权（2026-10-24），外部定时任务据 `wake_plan` 建立或调整，须调用 `watch run --due`，`--force` 会绕过“拿到即跳过”。
 
 授权范围由已确认的订阅及其关联任务确定。作品、季、来源、检查频率或写入范围变化均须有对应用户授权，不因日历、搜索结果或任务恢复自动扩大。
 

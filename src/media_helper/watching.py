@@ -9,6 +9,7 @@ from .catalog import parse_file
 from .journal import JobJournal
 from .naming import episode_filename, media_info
 from .planner import _chinese_integer, _episode_metadata
+from .schedules import ScheduleCache, obtain_schedule, schedule_timing
 from .search import PanSouSearch, PreferredSourceSearch
 from .sources import extract_selected_sources, safe_source
 from .subscriptions import POLICY_DEFAULTS
@@ -538,9 +539,10 @@ def _new_files(report):
             for row in operation.get('verified_files', []) if row.get('verified') is True]
 
 
-def run_subscription(subscription, config, root, *, apply=False, as_of=None, reconcile_pending=False):
+def run_subscription(subscription, config, root, *, apply=False, as_of=None, reconcile_pending=False,
+                     refresh_schedule=False):
     """Caller holds the existing account lock. No interval or permission bypass."""
-    from .headless_cli import _prepare_identity, _metadata, _storage, _safe_failure
+    from .headless_cli import _prepare_identity, _metadata, _storage, _safe_failure, _trakt
     current = as_of or datetime.now(timezone.utc)
     request = deepcopy(subscription['request'])
     request['as_of'] = current.isoformat()
@@ -553,6 +555,8 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
     journal = None
     update_report = None
     preferred = subscription.get('preferred_sources', [])
+    schedules = ScheduleCache(root)
+    zone = config.get('timezone', 'Asia/Shanghai')
 
     def finish(report):
         report['subscription_id'] = subscription['subscription_id']
@@ -563,6 +567,14 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
         report.setdefault('new_files', [])
         if update_report is not None:
             report['metadata_updates'] = update_report
+            cached = schedules.load(subscription['subscription_id'])
+            timing = schedule_timing(update_report, report, interval_hours=subscription.get('interval_hours', 6),
+                                     now=current, timezone_name=zone, previous_plan=(cached or {}).get('wake_plan'))
+            report['next_check_at'] = timing['next_check_at'].isoformat()
+            report['wake_plan'] = timing['wake_plan']
+            if cached is not None:
+                cached['wake_plan'] = timing['wake_plan']
+                schedules.save(subscription['subscription_id'], cached)
         return store.finish(task, report, resolved_request=task.get('execution_request', request))
 
     try:
@@ -579,7 +591,15 @@ def run_subscription(subscription, config, root, *, apply=False, as_of=None, rec
         if secondary_spec:
             secondary, _ = _metadata(secondary_spec['source'])
             secondary_id = secondary_spec.get('series_id')
-        update_report = collect_updates(request, primary, secondary, secondary_id, current)
+        try:
+            trakt = _trakt(config)
+        except ValueError:
+            trakt = None  # An unreadable Trakt credential only loses the schedule fill.
+        update_report = obtain_schedule(
+            subscription['subscription_id'], request,
+            fetch=lambda: collect_updates(request, primary, secondary, secondary_id, current),
+            primary=primary, trakt=trakt, cache=schedules, now=current, refresh=refresh_schedule,
+            timezone_name=zone, secondary=secondary_spec)
         if not update_report['automatic_transfer_allowed']:
             hard = next((row.get('http_status') for row in update_report.get('errors', [])
                          if row.get('http_status') in {401, 403, 429}), None)

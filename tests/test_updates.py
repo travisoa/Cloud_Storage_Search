@@ -5,7 +5,7 @@ import json
 import unittest
 
 from media_helper.catalog import MetadataError, calculate_missing, build_episode_inventory
-from media_helper.updates import UpdatesMetadata, collect_updates
+from media_helper.updates import UpdatesMetadata, collect_updates, fill_schedule
 
 
 AS_OF = "2026-10-17T10:00:00+08:00"
@@ -237,6 +237,63 @@ class UpdatesScenarios(unittest.TestCase):
             wrapped.get_series(17)
         with self.assertRaises(ValueError):
             wrapped.get_season(9, 2)
+
+
+def primary_row(episode, air_date, **changes):
+    return {"season": 1, "episode": episode, "episode_key": f"S01E{episode:02d}", "source": "tmdb",
+            "air_date": air_date, "air_at": None, "date_precision": "date" if air_date else "unknown", **changes}
+
+
+def trakt_row(episode, air_at, air_date):
+    return {"season": 1, "episode": episode, "source": "trakt", "air_at": air_at, "air_date": air_date,
+            "date_precision": "datetime" if air_at else "unknown"}
+
+
+class FillScheduleScenarios(unittest.TestCase):
+    def fill(self, primary, supplement):
+        report = {"evidence": [], "conflicts": []}
+        return fill_schedule(primary, supplement, report), report
+
+    def test_same_date_takes_supplement_time(self):
+        source = [primary_row(1, "2026-10-25")]
+        rows, report = self.fill(source, [trakt_row(1, "2026-10-25T04:00:00Z", "2026-10-25")])
+        self.assertEqual((rows[0]["air_date"], rows[0]["air_at"], rows[0]["date_precision"]),
+                         ("2026-10-25", "2026-10-25T04:00:00Z", "datetime"))
+        self.assertEqual(rows[0]["schedule_basis"], "primary+supplement_time")
+        self.assertEqual(rows[0]["source"], "tmdb")
+        self.assertIsNone(source[0]["air_at"])
+        self.assertEqual(report["evidence"], [])
+
+    def test_missing_primary_date_is_filled(self):
+        rows, _ = self.fill([primary_row(23, None)], [trakt_row(23, "2026-10-30T04:00:00Z", "2026-10-30")])
+        self.assertEqual((rows[0]["air_date"], rows[0]["air_at"], rows[0]["date_precision"], rows[0]["schedule_basis"]),
+                         ("2026-10-30", "2026-10-30T04:00:00Z", "datetime", "supplement"))
+
+    def test_earlier_supplement_wins_and_is_recorded(self):
+        rows, report = self.fill([primary_row(2, "2026-10-26")], [trakt_row(2, "2026-10-25T04:00:00Z", "2026-10-25")])
+        self.assertEqual((rows[0]["air_date"], rows[0]["air_at"], rows[0]["schedule_basis"]),
+                         ("2026-10-25", "2026-10-25T04:00:00Z", "supplement"))
+        self.assertEqual(report["evidence"], [{"code": "supplement_schedule_disagreement", "episode_key": "S01E02",
+                                               "primary_date": "2026-10-26", "supplement_date": "2026-10-25",
+                                               "chosen": "supplement"}])
+        self.assertEqual(report["conflicts"], [])
+
+    def test_earlier_primary_wins_and_keeps_date_precision(self):
+        rows, report = self.fill([primary_row(2, "2026-10-25")], [trakt_row(2, "2026-10-26T04:00:00Z", "2026-10-26")])
+        self.assertEqual((rows[0]["air_date"], rows[0]["air_at"], rows[0]["date_precision"], rows[0]["schedule_basis"]),
+                         ("2026-10-25", None, "date", "primary"))
+        self.assertEqual(report["evidence"][0]["chosen"], "primary")
+
+    def test_primary_timestamp_or_missing_supplement_is_untouched(self):
+        timed = primary_row(1, "2026-10-25", air_at="2026-10-25T12:00:00Z", date_precision="datetime")
+        rows, report = self.fill([timed, primary_row(2, "2026-10-26"), primary_row(3, "2026-10-27")],
+                                 [trakt_row(1, "2026-10-24T04:00:00Z", "2026-10-24"), trakt_row(2, None, None),
+                                  trakt_row(4, "2026-10-28T04:00:00Z", "2026-10-28")])
+        self.assertEqual([(row["air_date"], row["air_at"], row["schedule_basis"]) for row in rows],
+                         [("2026-10-25", "2026-10-25T12:00:00Z", "primary"), ("2026-10-26", None, "primary"),
+                          ("2026-10-27", None, "primary")])
+        self.assertEqual(report["evidence"], [{"code": "supplement_episode_set_difference",
+                                               "primary_only": ["S01E03"], "supplement_only": ["S01E04"]}])
 
 
 if __name__ == "__main__":

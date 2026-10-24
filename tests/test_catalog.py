@@ -10,7 +10,7 @@ import unittest
 from urllib.error import HTTPError, URLError
 
 from media_helper.catalog import (
-    EpisodeKey, MetadataError, TMDBProvider, TVmazeProvider,
+    EpisodeKey, MetadataError, TMDBProvider, TraktProvider, TVmazeProvider,
     build_episode_inventory, calculate_missing, match_series_dirs, parse_file,
 )
 
@@ -337,6 +337,71 @@ class MetadataScenarios(unittest.TestCase):
         provider = TVmazeProvider(opener=Responses({"id": 8, "name": "wrong"}))
         with self.assertRaises(MetadataError):
             provider.get_series(9)
+
+    def test_trakt_requests_send_client_id_header_only(self):
+        responses = Responses({"title": "嫁金钗", "year": 2026, "status": "returning series",
+                               "airs": {"day": "Monday", "time": "12:00", "timezone": "Asia/Shanghai"},
+                               "ids": {"trakt": 5, "slug": "jia-jin-chai", "tmdb": 300146,
+                                       "imdb": "tt42576855", "tvdb": 471705}})
+        series = TraktProvider(client_id="fixture-client-id", opener=responses, now=NOW).get_series(5)
+        request = responses.requests[0]
+        self.assertEqual(request.get_header("Trakt-api-key"), "fixture-client-id")
+        self.assertEqual(request.get_header("Trakt-api-version"), "2")
+        self.assertIn("/shows/5", request.full_url)
+        self.assertIn("extended=full", request.full_url)
+        self.assertNotIn("fixture-client-id", request.full_url)
+        self.assertNotIn("fixture-client-id", json.dumps(series))
+        self.assertEqual(series["source"], "trakt")
+        self.assertEqual((series["id"], series["tmdb_id"], series["imdb_id"], series["tvdb_id"]),
+                         (5, 300146, "tt42576855", 471705))
+        self.assertEqual(series["airs"], {"day": "Monday", "time": "12:00", "timezone": "Asia/Shanghai"})
+        self.assertEqual(series["fetched_at"], "2026-10-16T12:00:00Z")
+        with self.assertRaises(MetadataError):
+            TraktProvider(client_id="fixture", opener=Responses({"ids": {"trakt": 6}})).get_series(5)
+        with self.assertRaises(ValueError):
+            TraktProvider(client_id=" ")
+
+    def test_trakt_find_by_tmdb_returns_candidates_with_tmdb_id(self):
+        responses = Responses([{"type": "show", "score": 1000,
+                                "show": {"title": "嫁金钗", "year": 2026, "ids": {"trakt": 5, "tmdb": 300146}}},
+                               {"type": "movie", "movie": {"title": "其他", "ids": {"trakt": 9, "tmdb": 300146}}}])
+        rows = TraktProvider(client_id="fixture", opener=responses, now=NOW).find_by_tmdb(300146)
+        self.assertEqual(rows, [{"id": 5, "source_id": 5, "source": "trakt", "title": "嫁金钗", "year": 2026,
+                                 "tmdb_id": 300146, "fetched_at": "2026-10-16T12:00:00Z"}])
+        self.assertIn("/search/tmdb/300146", responses.requests[0].full_url)
+        self.assertIn("type=show", responses.requests[0].full_url)
+
+    def test_trakt_season_converts_utc_to_show_local_date(self):
+        responses = Responses([
+            {"season": 1, "number": 1, "title": "第一集", "first_aired": "2026-10-16T04:00:00.000Z", "ids": {"trakt": 51}},
+            {"season": 1, "number": 2, "title": "第二集", "first_aired": "2026-10-16T16:30:00.000Z", "ids": {"trakt": 52}},
+            {"season": 1, "number": 3, "title": "", "first_aired": None, "ids": {"trakt": 53}},
+        ])
+        rows = TraktProvider(client_id="fixture", opener=responses, now=NOW).get_season(5, 1, "Asia/Shanghai")
+        self.assertIn("/shows/5/seasons/1", responses.requests[0].full_url)
+        self.assertEqual([(row["episode"], row["air_date"], row["air_at"], row["date_precision"]) for row in rows], [
+            (1, "2026-10-16", "2026-10-16T04:00:00Z", "datetime"),
+            (2, "2026-10-17", "2026-10-16T16:30:00Z", "datetime"),
+            (3, None, None, "unknown")])
+        self.assertTrue(all(row["source"] == "trakt" and row["is_expected"] for row in rows))
+        with self.assertRaises(ValueError):
+            TraktProvider(client_id="fixture").get_season(5, None)
+
+    def test_trakt_invalid_timezone_falls_back_to_configured_zone(self):
+        responses = Responses([{"season": 1, "number": 1, "first_aired": "2026-10-16T17:00:00.000Z", "ids": {"trakt": 51}}])
+        rows = TraktProvider(client_id="fixture", opener=responses, now=NOW).get_season(5, 1, "Mars/Base")
+        self.assertEqual(rows[0]["air_date"], "2026-10-17")
+
+    def test_trakt_credentials_file_must_be_private(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "trakt.json"
+            path.write_text('{"client_id":"fixture-local-client"}')
+            path.chmod(0o600)
+            provider = TraktProvider.from_credentials_file(path, opener=Responses([]))
+            self.assertEqual(provider.find_by_tmdb(1), [])
+            path.chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "0600"):
+                TraktProvider.from_credentials_file(path)
 
 
 if __name__ == "__main__":

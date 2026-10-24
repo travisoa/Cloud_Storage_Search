@@ -139,9 +139,9 @@ class SubscriptionCycleTests(unittest.TestCase):
                               "air_date": "2026-10-15", "date_precision": "date", "source": "tmdb"}
                              for number in numbers], "conflicts": [], "errors": []}
 
-    def cycle(self, sub=None, *, apply=True):
-        return run_subscription(sub or subscription(), self.config, self.root,
-                                apply=apply, as_of=datetime(2026, 10, 17, 0, tzinfo=timezone.utc))
+    def cycle(self, sub=None, *, apply=True, as_of=None, **options):
+        return run_subscription(sub or subscription(), self.config, self.root, apply=apply,
+                                as_of=as_of or datetime(2026, 10, 17, 0, tzinfo=timezone.utc), **options)
 
     def assert_no_writes(self):
         self.assertEqual((self.storage.saved, self.storage.renamed, self.storage.created), ([], [], []))
@@ -181,6 +181,45 @@ class SubscriptionCycleTests(unittest.TestCase):
         self.assertEqual(self.storage.share_calls, [])
         self.fallback.search.assert_not_called()
         self.assert_no_writes()
+
+    def timed_update(self):
+        self.updates = self.update_report((1,))
+        self.updates["episodes"].append({"season": 1, "episode": 2, "episode_key": "S01E02", "source": "tmdb",
+                                         "air_date": "2026-10-17", "air_at": "2026-10-17T04:00:00Z",
+                                         "date_precision": "datetime"})
+
+    def test_cycle_reports_next_check_and_wake_plan(self):
+        self.timed_update()
+        report = self.cycle()
+        self.assertEqual(report["status"], "UP_TO_DATE", report)
+        self.assertEqual(report["next_check_at"], "2026-10-17T04:30:00+00:00")
+        self.assertEqual((report["wake_plan"]["mode"], report["wake_plan"]["rrule"]),
+                         ("fixed_times", "FREQ=DAILY;BYHOUR=0,6,12,18;BYMINUTE=30"))
+        self.assertTrue(report["wake_plan"]["changed"])
+        again = self.cycle(as_of=datetime(2026, 10, 17, 1, tzinfo=timezone.utc))
+        self.assertFalse(again["wake_plan"]["changed"])
+
+    def test_second_cycle_uses_cached_schedule(self):
+        self.timed_update()
+        self.cycle()
+        report = self.cycle(as_of=datetime(2026, 10, 17, 6, tzinfo=timezone.utc))
+        self.assertEqual(self.collect.call_count, 1)
+        self.assertTrue(report["metadata_updates"]["schedule_cache"]["used_cache"])
+        self.assertEqual(report["status"], "COMPLETE", report)
+
+    def test_changed_secondary_source_rereads_schedule(self):
+        self.timed_update()
+        self.cycle()
+        with patch("media_helper.headless_cli._metadata", return_value=(Mock(source="tvmaze"), "tvmaze")):
+            self.cycle(subscription(secondary={"source": "tvmaze", "series_id": "91309"}),
+                       as_of=datetime(2026, 10, 17, 1, tzinfo=timezone.utc))
+        self.assertEqual(self.collect.call_count, 2)
+
+    def test_refresh_schedule_forces_fetch(self):
+        self.timed_update()
+        self.cycle()
+        self.cycle(as_of=datetime(2026, 10, 17, 1, tzinfo=timezone.utc), refresh_schedule=True)
+        self.assertEqual(self.collect.call_count, 2)
 
     def test_available_subset_is_saved_while_other_due_episode_stays_missing(self):
         self.updates = self.update_report((1, 2, 3))

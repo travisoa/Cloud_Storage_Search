@@ -156,6 +156,17 @@ def _metadata(source):
     return TVmazeProvider(), "tvmaze"
 
 
+def _trakt(config):
+    """Trakt schedule fill needs the explicit configure-trakt switch and a Client ID."""
+    if config.get("trakt_schedule_fill") is not True or not _configured("trakt.json", "TRAKT_CLIENT_ID"):
+        return None
+    from .catalog import TraktProvider
+    if os.environ.get("TRAKT_CLIENT_ID"):
+        return TraktProvider(client_id=os.environ["TRAKT_CLIENT_ID"])
+    from .credentials import secret_path
+    return TraktProvider.from_credentials_file(secret_path("trakt.json"))
+
+
 def _bindings():
     path = ROOT / "runtime/series-bindings.json"
     if not path.exists():
@@ -521,6 +532,7 @@ def main(argv=None):
     commands.add_parser("alist-status", help="show mount names and credential availability, never credential values")
     tmdb = commands.add_parser("configure-tmdb", help="enter a TMDB read token privately in this terminal")
     tmdb.add_argument("--api-key", action="store_true")
+    commands.add_parser("configure-trakt", help="enter a Trakt Client ID privately in this terminal; enables schedule fill")
     discover = commands.add_parser("discover", help="look up metadata candidates; never opens a web page")
     discover.add_argument("title")
     discover.add_argument("--year", type=int)
@@ -625,6 +637,13 @@ def main(argv=None):
                 config["credential_source"] = {"type": "file"}
                 _private_json(ROOT / "config/headless.json", config)
             result = {"status": "CONFIGURED", "credential": args.command.removeprefix("configure-"), "value_displayed": False}
+        elif args.command == "configure-trakt":
+            from .credentials import read_input, write_secret
+            write_secret("trakt.json", {"client_id": read_input("Trakt Client ID（隐藏输入）：")})
+            config = _config()
+            config["trakt_schedule_fill"] = True
+            _private_json(ROOT / "config/headless.json", config)
+            result = {"status": "CONFIGURED", "credential": "trakt", "value_displayed": False}
         elif args.command == "doctor":
             config = _config()
             try:
@@ -635,6 +654,7 @@ def main(argv=None):
             result = {"mode": "headless", "browser_opened": False, "search_ready": search_ok,
                       "quark_configured": _quark_ready(config), "credential_source": config.get("credential_source", {}).get("type", "file_or_environment"),
                       "tmdb_configured": _configured("tmdb.json", "TMDB_READ_ACCESS_TOKEN") or bool(os.environ.get("TMDB_API_KEY")),
+                      "trakt_configured": _configured("trakt.json", "TRAKT_CLIENT_ID"),
                       "library_root_configured": bool(config.get("library_root_id"))}
             if args.check_quark:
                 files = _storage(config).list_files(config["library_root_id"])

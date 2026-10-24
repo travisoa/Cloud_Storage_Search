@@ -1,6 +1,7 @@
 """Subscription CLI authority and scheduling tests; every cloud call is mocked."""
 from contextlib import ExitStack, redirect_stdout
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 import io
 import json
 from pathlib import Path
@@ -10,6 +11,7 @@ from unittest.mock import patch
 
 from media_helper.headless_cli import main
 from media_helper.journal import run_lock
+from media_helper.schedules import ScheduleCache
 from media_helper.sources import safe_source
 from media_helper.subscriptions import SubscriptionStore
 from media_helper.tasks import TaskStore
@@ -221,6 +223,52 @@ class WatchCommandsTests(unittest.TestCase):
         self.assertEqual((code, skipped["checked_count"]), (0, 0), skipped)
         self.runner.assert_not_called()
 
+    def test_run_persists_computed_next_check_and_outputs_wake_plan(self):
+        record = self.add("--auto-save")
+        plan = {"mode": "fixed_times", "rrule": "FREQ=DAILY;BYHOUR=12,18;BYMINUTE=30",
+                "summary": "每天 12:30 检查，18:30 补查", "basis": "8 集预计 12:00 播出（Trakt）",
+                "changed": True, "stop": False}
+        soon = (datetime.now(timezone.utc) + timedelta(minutes=45)).isoformat()
+        self.runner.side_effect = lambda sub, *args, **kwargs: {**self.healthy_report(sub),
+                                                                "next_check_at": soon, "wake_plan": plan}
+        code, report = self.command(["run", "--subscription-id", record["subscription_id"], "--apply"])
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["subscriptions"][0]["next_check_at"], soon)
+        self.assertEqual(report["subscriptions"][0]["wake_plan"], plan)
+        self.assertEqual(self.store.get(record["subscription_id"])["next_check_at"], soon)
+        past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+        self.runner.side_effect = lambda sub, *args, **kwargs: {**self.healthy_report(sub), "next_check_at": past}
+        code, report = self.command(["run", "--subscription-id", record["subscription_id"], "--apply"])
+        self.assertEqual(code, 0, report)
+        self.assertGreater(datetime.fromisoformat(report["subscriptions"][0]["next_check_at"]),
+                           datetime.now(timezone.utc) + timedelta(hours=5))
+        self.assertIsNone(report["subscriptions"][0]["wake_plan"])
+
+    def test_status_includes_cached_wake_plan(self):
+        record = self.add("--auto-save")
+        code, report = self.command(["status", record["subscription_id"]])
+        self.assertEqual(code, 0, report)
+        self.assertIsNone(report["wake_plan"])
+        self.assertIsNone(report["schedule_supplement"])
+        plan = {"mode": "interval", "rrule": "FREQ=HOURLY;INTERVAL=6", "summary": "每 6 小时检查",
+                "basis": "没有具体播出时刻", "changed": False, "stop": False}
+        ScheduleCache(self.root).save(record["subscription_id"], {
+            "schema_version": 1, "wake_plan": plan,
+            "supplement": {"status": "error", "reason": "http_error", "http_status": 403, "trakt_id": 5,
+                           "rows": [{"season": 1, "episode": 1}]}})
+        code, report = self.command(["status", record["subscription_id"]])
+        self.assertEqual(report["wake_plan"], plan)
+        self.assertEqual(report["schedule_supplement"], {"source": "trakt", "status": "error", "trakt_id": 5,
+                                                         "reason": "http_error", "http_status": 403,
+                                                         "action": "rerun_configure_trakt"})
+
+    def test_refresh_schedule_flag_is_passed(self):
+        record = self.add("--auto-save")
+        self.command(["run", "--subscription-id", record["subscription_id"]])
+        self.assertFalse(self.runner.call_args.kwargs["refresh_schedule"])
+        self.command(["run", "--subscription-id", record["subscription_id"], "--refresh-schedule"])
+        self.assertTrue(self.runner.call_args.kwargs["refresh_schedule"])
+
     def test_busy_account_is_quiet_and_starts_no_cycle(self):
         self.add("--auto-save")
         with run_lock(self.root / "runtime/workflow.lock"):
@@ -249,6 +297,7 @@ class WatchCommandsTests(unittest.TestCase):
         self.assertTrue(report["subscription"]["enabled"])
         self.assertFalse(self.runner.call_args.kwargs["apply"])
         self.assertTrue(self.runner.call_args.kwargs["reconcile_pending"])
+        self.assertTrue(self.runner.call_args.kwargs["refresh_schedule"])
         self.assertEqual(self.runner.call_args.args[0]["subscription_id"], record["subscription_id"])
         self.assertTrue(self.runner.call_args.args[0]["blocked"])
 

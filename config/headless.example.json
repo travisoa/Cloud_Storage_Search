@@ -32,5 +32,6 @@
       "name": "综艺节目"
     }
   },
-  "version_preset": "quality"
+  "version_preset": "quality",
+  "trakt_schedule_fill": false
 }

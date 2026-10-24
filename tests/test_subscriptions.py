@@ -135,7 +135,9 @@ class SubscriptionTests(unittest.TestCase):
         record = self.add()
         result = self.run_record(record, self.report())
         self.assertEqual(result["record"]["last_checked_at"], "2026-10-17T01:00:00+00:00")
-        self.assertEqual(self.store.due(NOW + timedelta(hours=5, minutes=59)), [])
+        self.assertEqual(self.store.due(NOW + timedelta(hours=5, minutes=54)), [])
+        # A scheduler that fires a few minutes early still runs the check it was set for.
+        self.assertEqual(len(self.store.due(NOW + timedelta(hours=5, minutes=56))), 1)
         self.assertEqual(len(self.store.due(NOW + timedelta(hours=6))), 1)
         self.store.set_enabled(record["subscription_id"], False)
         self.assertEqual(self.store.due(NOW + timedelta(days=2)), [])

@@ -13,7 +13,7 @@
 | 作品匹配 | TMDB / TVmaze 身份、年份、别名及公共 ID 核对；电影使用 TMDB |
 | 缺集转存 | 读取真实库存，仅补明确缺集；PanSou 搜索后实际枚举分享文件 |
 | 统一命名 | 复用作品目录名前缀，按来源标签补充分辨率、动态范围与音轨，字幕同步 |
-| 持续追更 | 按作品和季订阅，复用已确认来源，支持暂停、阻断与恢复 |
+| 持续追更 | 按作品和季订阅，复用已确认来源，支持暂停、阻断与恢复；日程按订阅缓存，可由 Trakt 补齐播出时刻并按播出时间安排检查 |
 | 影库维护 | 只读体检、版本策略、新网盘建库、旧资源整理及单包隔离云解压 |
 | 执行恢复 | 持久化任务 ID 和操作意图，按真实文件 ID 对账，避免重复提交 |
 
@@ -25,7 +25,7 @@
 
 1. 从 [config/headless.example.json](config/headless.example.json) 创建本地 `config/headless.json`；已有配置应保留。填写真实影库根目录及分类目录 ID，目录 ID 与 AList 展示路径不能混用。`archive_cleanup` 决定手动解压后原压缩包及清空的暂存目录保留（`keep`）、移入回收站（`recycle`）或每次询问（`ask`），见[压缩包检查与隔离解压](docs/media-maintenance.md#压缩包检查与隔离解压)；订阅自动解压使用订阅自己的设置，默认 `recycle`。
 2. 配置夸克凭据。使用私有 Cookie 文件时执行 `configure-quark`；引用已有 AList 挂载时改用 `configure-alist --storage-id N`，两种方式择一。
-3. 使用电影功能或 TMDB 元数据时配置 TMDB 令牌，然后启动搜索服务并执行只读自检。
+3. 使用电影功能或 TMDB 元数据时配置 TMDB 令牌；需要具体播出时刻时可再录入 Trakt Client ID。然后启动搜索服务并执行只读自检。
 
 ```bash
 # 录入夸克 Cookie，保存为私有凭据文件，并将默认影库切换为文件凭据来源
@@ -33,6 +33,9 @@ python3 scripts/media.py configure-quark
 
 # 录入 TMDB API 读取令牌，用于电影身份匹配及 TMDB 作品、季集与日程查询
 python3 scripts/media.py configure-tmdb
+
+# 可选：录入 Trakt Client ID，为 TMDB 订阅补齐缺少的单集日期与播出时刻
+python3 scripts/media.py configure-trakt
 
 # 启动 PanSou 网盘搜索服务；不执行转存，也不创建追更调度
 python3 scripts/manage.py up
@@ -97,7 +100,7 @@ python3 scripts/media.py adopt-scope JOB_KEY
 | 单个作品目录原地改名 | `tidy`；[原地规范命名](docs/media-maintenance.md#单个作品目录原地规范命名) |
 | 订阅与周期检查 | `watch`；[订阅执行约定](docs/headless-design.md#订阅与周期检查) |
 
-建库仅创建目录，不自动整理旧资源、切换默认影库或创建订阅。生产影库支持电影与电视剧请求；新影库的追更尚未接入。持续追更由 `watch` 保存订阅、Codex heartbeat 周期唤醒，仅执行启用且已获授权的作品和季，阻断状态不会自动清除。
+建库仅创建目录，不自动整理旧资源、切换默认影库或创建订阅。生产影库支持电影与电视剧请求；新影库的追更尚未接入。持续追更由 `watch` 保存订阅、Codex heartbeat 周期唤醒，仅执行启用且已获授权的作品和季，阻断状态不会自动清除。外部定时任务应调用 `watch run --due --apply`，可按 `watch status` 输出的 `wake_plan` 调整唤醒时刻。
 
 ## 验证与文档
 
@@ -124,6 +127,7 @@ python3 scripts/smoke.py
 - [Quark Auto Save X](https://github.com/x1ao4/quark-auto-save-x) 及其上游 [quark-auto-save](https://github.com/Cp0204/quark-auto-save)：夸克分享、转存、任务及云解压接口参考。
 - [AList](https://github.com/AlistGo/alist)：夸克驱动文件移动接口与已有挂载凭据引用。
 - [TMDB](https://developer.themoviedb.org/) / [TVmaze](https://www.tvmaze.com/api)：作品身份、别名、外部 ID 与季集日程。
+- [Trakt](https://developer.trakt.tv/)：TMDB 缺少的单集日期与播出时刻。本项目使用 Trakt，但未获 Trakt 认可或认证。
 - [Infuse Metadata 101](https://support.firecore.com/hc/en-us/articles/215090947-Metadata-101)：影视目录及文件命名参考。
 
 上述项目与服务分别遵循其许可证及使用条款。

@@ -143,6 +143,36 @@ class ConversationalRequestTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertFalse(result["browser_opened"])
         self.assertFalse(result["quark_configured"])
+        self.assertIs(result["trakt_configured"], False)
+
+    def test_configure_trakt_stores_secret_and_enables_fill(self):
+        output, saved = io.StringIO(), {}
+        config = {"pansou_url": "http://127.0.0.1:8888", "library_root_id": "fixture-root"}
+        with patch("media_helper.headless_cli._config", return_value=config), \
+                patch("media_helper.credentials.read_input", return_value="fixture-client-id") as prompt, \
+                patch("media_helper.credentials.write_secret", side_effect=lambda name, value: saved.update({name: value})), \
+                patch("media_helper.headless_cli._private_json") as write_config, redirect_stdout(output):
+            code = main(["configure-trakt"])
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(saved, {"trakt.json": {"client_id": "fixture-client-id"}})
+        self.assertIn("Trakt", prompt.call_args.args[0])
+        self.assertIs(write_config.call_args.args[1]["trakt_schedule_fill"], True)
+        self.assertEqual(result, {"status": "CONFIGURED", "credential": "trakt", "value_displayed": False})
+        self.assertNotIn("fixture-client-id", output.getvalue())
+
+
+class TraktSupplementTests(unittest.TestCase):
+    def test_trakt_requires_explicit_switch_and_credential(self):
+        from media_helper.headless_cli import _trakt
+        with patch("media_helper.headless_cli._configured", return_value=True), \
+                patch.dict("os.environ", {"TRAKT_CLIENT_ID": "fixture-env-id"}):
+            self.assertIsNone(_trakt({}))
+            self.assertIsNone(_trakt({"trakt_schedule_fill": False}))
+            provider = _trakt({"trakt_schedule_fill": True})
+            self.assertEqual(provider.source, "trakt")
+        with patch("media_helper.headless_cli._configured", return_value=False):
+            self.assertIsNone(_trakt({"trakt_schedule_fill": True}))
 
 
 if __name__ == "__main__":

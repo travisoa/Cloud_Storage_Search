@@ -23,6 +23,7 @@ from .sources import safe_source
 
 
 HEALTHY_STATUSES = frozenset({"UP_TO_DATE", "WAITING", "READY", "COMPLETE"})
+DUE_GRACE = timedelta(minutes=5)
 ATTENTION_STATUSES = frozenset({"NEEDS_INPUT", "NEEDS_AUTH", "RISK_CONTROL", "UNKNOWN", "FAILED",
                                 "PARTIAL", "PENDING", "READY_TO_CONTINUE", "READY_TO_RENAME", "NO_RECORD", "METADATA_CONFLICT"})
 SUPPORTED_STATUSES = HEALTHY_STATUSES | ATTENTION_STATUSES
@@ -507,9 +508,10 @@ class SubscriptionStore:
             return deepcopy(record)
 
     def due(self, as_of=None):
+        # A scheduler may fire a little before the planned time; DUE_GRACE keeps that run.
         as_of = _time(as_of if as_of is not None else _now())
         return [record for record in self.list() if record["enabled"] and
-                (record.get("next_check_at") is None or _time(record["next_check_at"]) <= as_of)]
+                (record.get("next_check_at") is None or _time(record["next_check_at"]) <= as_of + DUE_GRACE)]
 
     def record_run(self, subscription_id, report, *, checked_at=None, next_check_at=None):
         checked_at = _time(checked_at if checked_at is not None else _now())
